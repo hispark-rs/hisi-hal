@@ -45,6 +45,7 @@ pub struct Uart<'d, T> {
     _peripheral: PhantomData<&'d T>,
 }
 
+#[allow(dead_code)]
 fn regs() -> &'static ws63_pac::uart0::RegisterBlock {
     unsafe { &*Uart0::ptr() }
 }
@@ -88,7 +89,7 @@ fn configure_uart(idx: u8, config: &Config) {
 
     // Enable divider access
     r.uart_ctl().modify(|_, w| unsafe { w.bits(0) });
-    r.uart_ctl().write(|w| unsafe { w.div_en().set_bit() });
+    r.uart_ctl().write(|w| w.div_en().set_bit());
 
     // Set baud rate: div = PCLK / (16 * baudrate)
     let pclk = crate::soc::ws63::SYSTEM_CLOCK_HZ;

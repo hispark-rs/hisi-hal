@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/sanchuanhehe/ws63-hal"
 
 [dependencies]
-ws63-pac = { path = "../ws63-pac", features = ["critical-section", "rt"] }
+ws63-pac = { git = "https://github.com/sanchuanhehe/ws63-pac", features = ["critical-section", "rt"] }
 embedded-hal = "1.0.0"
 embedded-io = "0.6"
 nb = "1"

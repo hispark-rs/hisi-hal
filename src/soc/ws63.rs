@@ -1,11 +1,5 @@
 //! WS63 chip-specific PAC re-export and configuration.
-//!
-//! The WS63 is a HiSilicon Wi-Fi/BLE/SLE Combo SoC with:
-//! - RISC-V RV32IMFC_Zicsr core @ 240MHz
-//! - 35 peripherals
-//! - 40 external interrupts
-//! - Custom interrupt controller (SYS_CTL1), no standard CLINT/PLIC
-//! - 512KB ITCM, 288KB DTCM, 640KB shared SRAM, 4MB Flash
+#![allow(dead_code)]
 
 pub use ws63_pac::interrupt::ExternalInterrupt as Interrupt;
 

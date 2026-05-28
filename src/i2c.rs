@@ -50,6 +50,7 @@ fn configure_i2c(idx: u8, freq: u32) {
 }
 
 impl<T> I2c<'_, T> {
+    #[allow(dead_code)]
     fn wait_not_busy(&self) {
         let r = i2c_regs(self.idx);
         while r.i2c_sr().read().bus_busy().bit_is_set() {}

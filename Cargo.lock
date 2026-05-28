@@ -133,6 +133,7 @@ dependencies = [
 [[package]]
 name = "ws63-pac"
 version = "0.1.0"
+source = "git+https://github.com/sanchuanhehe/ws63-pac#6dc075581d8e7f1228d8d6947676838ca93de1cd"
 dependencies = [
  "critical-section",
  "riscv",

@@ -55,9 +55,14 @@ macro_rules! peripherals {
         impl Peripherals {
             pub fn take() -> Option<Self> {
                 let pac = ws63_pac::Peripherals::take()?;
-                Some(unsafe { Self::from_pac(pac) })
+                Some(Self::from_pac(pac))
             }
 
+            /// Unchecked version of `take`. Does not check singleton.
+            ///
+            /// # Safety
+            ///
+            /// Each peripheral must be used at most once.
             pub unsafe fn steal() -> Self {
                 let pac = unsafe { ws63_pac::Peripherals::steal() };
                 Self::from_pac(pac)

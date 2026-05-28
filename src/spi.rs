@@ -134,12 +134,12 @@ impl embedded_hal::spi::SpiBus for Spi<'_, Spi0<'_>> {
     }
     fn transfer_in_place(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
         let r = spi_regs(self.idx);
-        for i in 0..buf.len() {
-            let tx = buf[i] as u32;
+        for byte in buf.iter_mut() {
+            let tx = *byte as u32;
             while !r.spi_wsr().read().txfnf().bit_is_set() {}
             unsafe { r.spi_dr().write(|w| w.bits(tx)) };
             while !r.spi_wsr().read().rxfne().bit_is_set() {}
-            buf[i] = r.spi_dr().read().bits() as u8;
+            *byte = r.spi_dr().read().bits() as u8;
         }
         Ok(())
     }
