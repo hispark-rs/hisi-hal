@@ -1,4 +1,4 @@
-//! GPIO driver for WS63 (19 pins: GPIO0[7:0], GPIO1[15:8], GPIO2[18:16]).
+//! GPIO driver for WS63 (19 pins: GPIO0 bits 7-0, GPIO1 bits 15-8, GPIO2 bits 18-16).
 //!
 //! Three GPIO blocks at 0x4402_8000, 0x4402_9000, 0x4402_A000.
 

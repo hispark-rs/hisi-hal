@@ -3,6 +3,7 @@
 //! GPIO, UART, I2C, SPI, PWM, Timer, Clock, Interrupt management.
 #![no_std]
 #![allow(non_camel_case_types)]
+#![allow(rustdoc::broken_intra_doc_links)]
 
 pub mod clock;
 pub mod gpio;
