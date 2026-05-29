@@ -95,6 +95,23 @@ impl<'d> EfuseDriver<'d> {
             boot2_done: (sts & 0x10) != 0,
         }
     }
+
+    /// Read the chip ID from eFuse.
+    ///
+    /// The chip ID is stored in the eFuse control data register
+    /// and contains manufacturing information.
+    pub fn read_chip_id(&self) -> u32 {
+        self.regs().efuse_ctl_data().read().bits()
+    }
+
+    /// Read a raw eFuse word at the given control data value.
+    ///
+    /// * `ctl` — Control data value specifying which eFuse word to read.
+    pub fn read_raw(&mut self, ctl: u16) -> u32 {
+        self.set_control(ctl);
+        self.set_write_mode(false);
+        self.regs().efuse_ctl_data().read().bits()
+    }
 }
 
 /// eFuse status information.
@@ -108,4 +125,11 @@ pub struct EfuseStatus {
     pub boot1_done: bool,
     /// Boot stage 2 completed.
     pub boot2_done: bool,
+}
+
+impl EfuseStatus {
+    /// Returns true if all boot stages completed successfully.
+    pub fn boot_complete(&self) -> bool {
+        self.boot0_done && self.boot1_done && self.boot2_done
+    }
 }

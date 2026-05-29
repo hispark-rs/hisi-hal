@@ -388,6 +388,75 @@ impl<'d> DmaDriver<'d, Dma0> {
     }
 }
 
+// ── DMA peripheral binding traits ─────────────────────────────────
+
+/// Enumeration of DMA peripheral request sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DmaPeripheral {
+    /// SPI0 TX
+    Spi0Tx = 0,
+    /// SPI0 RX
+    Spi0Rx = 1,
+    /// SPI1 TX
+    Spi1Tx = 2,
+    /// SPI1 RX
+    Spi1Rx = 3,
+    /// UART0 TX
+    Uart0Tx = 4,
+    /// UART0 RX
+    Uart0Rx = 5,
+    /// UART1 TX
+    Uart1Tx = 6,
+    /// UART1 RX
+    Uart1Rx = 7,
+    /// UART2 TX
+    Uart2Tx = 8,
+    /// UART2 RX
+    Uart2Rx = 9,
+    /// I2S TX
+    I2sTx = 10,
+    /// I2S RX
+    I2sRx = 11,
+}
+
+/// Trait indicating a peripheral is DMA-eligible.
+///
+/// Each peripheral that supports DMA transfers specifies which
+/// DMA channel it can use and its peripheral request ID.
+pub trait DmaEligible {
+    /// The DMA peripheral identifier for this peripheral.
+    fn dma_peripheral() -> DmaPeripheral;
+}
+
+/// Trait bound ensuring a DMA channel can be used with a given peripheral.
+pub trait DmaChannelFor<P: DmaEligible> {}
+
+impl<'d, T, P> DmaChannelFor<P> for DmaDriver<'d, T>
+where
+    T: DmaInstance,
+    P: DmaEligible,
+{
+}
+
+/// Helper type alias for a DMA channel compatible with a peripheral.
+pub type PeripheralDmaChannel<P> = core::marker::PhantomData<P>;
+
+// ── DmaEligible implementations ──────────────────────────────────
+
+use crate::peripherals::{Spi0, Spi1};
+
+impl DmaEligible for Spi0<'static> {
+    fn dma_peripheral() -> DmaPeripheral {
+        DmaPeripheral::Spi0Tx
+    }
+}
+
+impl DmaEligible for Spi1<'static> {
+    fn dma_peripheral() -> DmaPeripheral {
+        DmaPeripheral::Spi1Tx
+    }
+}
+
 impl<'d> DmaDriver<'d, Sdma0> {
     /// Create a new secure DMA driver.
     pub fn new_sdma(_sdma: Sdma<'d>) -> Self {

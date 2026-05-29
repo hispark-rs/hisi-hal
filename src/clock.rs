@@ -230,4 +230,36 @@ impl<'d> ClockControl<'d> {
         let bits = cken.cken_ctl0().read();
         cken.cken_ctl0().write(|w| unsafe { w.bits(bits.bits() | (1 << 26)) });
     }
+
+    /// Disable the clock gate for a specific peripheral.
+    pub fn disable_peripheral(&self, peripheral: Peripheral) {
+        let cken = self.cldo_crg.register_block();
+        let (reg, bit) = peripheral.cken_info();
+        if reg == 0 {
+            let bits = cken.cken_ctl0().read();
+            cken.cken_ctl0().write(|w| unsafe { w.bits(bits.bits() & !(1 << bit)) });
+        } else {
+            let bits = cken.cken_ctl1().read();
+            cken.cken_ctl1().write(|w| unsafe { w.bits(bits.bits() & !(1 << bit)) });
+        }
+    }
+
+    /// Trigger a soft reset for a specific peripheral via CLDO_CRG.
+    pub fn reset_peripheral(&self, peripheral: Peripheral) {
+        let cken = self.cldo_crg.register_block();
+        let (reg, bit) = peripheral.cken_info();
+        // Reset: disable, then re-enable clock (power-cycle style reset)
+        if reg == 0 {
+            let bits = cken.cken_ctl0().read();
+            cken.cken_ctl0().write(|w| unsafe { w.bits(bits.bits() & !(1 << bit)) });
+            // Small delay
+            for _ in 0..100 { core::hint::spin_loop(); }
+            cken.cken_ctl0().write(|w| unsafe { w.bits(bits.bits() | (1 << bit)) });
+        } else {
+            let bits = cken.cken_ctl1().read();
+            cken.cken_ctl1().write(|w| unsafe { w.bits(bits.bits() & !(1 << bit)) });
+            for _ in 0..100 { core::hint::spin_loop(); }
+            cken.cken_ctl1().write(|w| unsafe { w.bits(bits.bits() | (1 << bit)) });
+        }
+    }
 }
