@@ -11,13 +11,14 @@
 macro_rules! const_assert {
     ($cond:expr, $msg:expr) => {
         const _: () = {
-            #[allow(dead_code)]
-            const ASSERT: () = if !$cond { panic!($msg) } else { () };
+            #[allow(dead_code, clippy::unit_arg)]
+            const ASSERT: () = if !$cond { panic!($msg) };
         };
     };
 }
 
 /// Assert that a pointer is 4-byte aligned (RISC-V MMIO requirement).
+#[allow(unused_macros)]
 macro_rules! ptr_aligned {
     ($ptr:expr) => {
         const_assert!($ptr as usize % 4 == 0, "MMIO pointer must be 4-byte aligned");
