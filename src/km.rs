@@ -86,8 +86,8 @@ mod tests {
         let slot: u16 = 3;
         let lock_cmd_bit: u32 = 1 << 20;
         let val: u32 = (slot as u32) | lock_cmd_bit;
-        assert_eq!(val & 0x3FF, 3);       // key_slot_num = 3 in bits [9:0]
-        assert_eq!((val >> 20) & 1, 1);    // lock_cmd = 1 at bit 20
+        assert_eq!(val & 0x3FF, 3); // key_slot_num = 3 in bits [9:0]
+        assert_eq!((val >> 20) & 1, 1); // lock_cmd = 1 at bit 20
     }
 
     #[test]
@@ -113,9 +113,9 @@ mod tests {
         // All 8 keyslots (0-7) must produce valid lock values
         for slot in 0..8u16 {
             let val: u32 = (slot as u32) | (1 << 20);
-            assert_eq!(val & 0x3FF, slot as u32);           // key_slot_num in bits [9:0]
-            assert_eq!((val >> 20) & 1, 1);                  // lock_cmd at bit 20
-            assert!(slot < super::KEYSLOT_COUNT as u16);     // within valid range
+            assert_eq!(val & 0x3FF, slot as u32); // key_slot_num in bits [9:0]
+            assert_eq!((val >> 20) & 1, 1); // lock_cmd at bit 20
+            assert!(slot < super::KEYSLOT_COUNT as u16); // within valid range
         }
     }
 }

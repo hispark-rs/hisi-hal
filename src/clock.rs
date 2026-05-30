@@ -208,13 +208,20 @@ impl<'d> ClockControl<'d> {
     }
 
     /// Enable the clock gate for SPI0.
-    pub fn enable_spi0(&self) { self.write_cken_bit(1, 25, true); }
+    pub fn enable_spi0(&self) {
+        self.write_cken_bit(1, 25, true);
+    }
 
     /// Enable the clock gate for SPI1.
-    pub fn enable_spi1(&self) { self.write_cken_bit(1, 26, true); }
+    pub fn enable_spi1(&self) {
+        self.write_cken_bit(1, 26, true);
+    }
 
     /// Enable the clock gate for both SPI0 and SPI1.
-    pub fn enable_spi(&self) { self.enable_spi0(); self.enable_spi1(); }
+    pub fn enable_spi(&self) {
+        self.enable_spi0();
+        self.enable_spi1();
+    }
 
     pub fn enable_pwm(&self) {
         // PWM has 9 contiguous bits (2:10) — needs bulk write
@@ -361,13 +368,23 @@ mod tests {
     #[test]
     fn test_peripheral_variants_are_unique() {
         let variants: [Peripheral; 17] = [
-            Peripheral::Uart0, Peripheral::Uart1, Peripheral::Uart2,
-            Peripheral::I2c0, Peripheral::I2c1,
-            Peripheral::Spi0, Peripheral::Spi1,
-            Peripheral::Pwm, Peripheral::Timer,
-            Peripheral::Lsadc, Peripheral::Tsensor,
-            Peripheral::I2s, Peripheral::Dma, Peripheral::Sdma,
-            Peripheral::Sfc, Peripheral::Trng, Peripheral::SecurityGroup,
+            Peripheral::Uart0,
+            Peripheral::Uart1,
+            Peripheral::Uart2,
+            Peripheral::I2c0,
+            Peripheral::I2c1,
+            Peripheral::Spi0,
+            Peripheral::Spi1,
+            Peripheral::Pwm,
+            Peripheral::Timer,
+            Peripheral::Lsadc,
+            Peripheral::Tsensor,
+            Peripheral::I2s,
+            Peripheral::Dma,
+            Peripheral::Sdma,
+            Peripheral::Sfc,
+            Peripheral::Trng,
+            Peripheral::SecurityGroup,
         ];
         for i in 0..variants.len() {
             for j in (i + 1)..variants.len() {

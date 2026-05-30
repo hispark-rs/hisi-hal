@@ -179,11 +179,7 @@ mod tests {
     #[test]
     fn test_trng_read_blocking_success_first_try() {
         let data_ready = true;
-        let result = if data_ready {
-            Ok(0xDEAD_BEEFu32)
-        } else {
-            Err(TrngError::Timeout)
-        };
+        let result = if data_ready { Ok(0xDEAD_BEEFu32) } else { Err(TrngError::Timeout) };
         assert_eq!(result.unwrap(), 0xDEAD_BEEF);
     }
 }

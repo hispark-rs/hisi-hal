@@ -118,9 +118,15 @@ impl<'d> TimerDriver<'d> {
     pub fn clear_interrupt(&self, n: usize) {
         let r = self.regs();
         match n {
-            0 => { let _ = r.timer0_eoi(0).read().bits(); }
-            1 => { let _ = r.timer0_eoi(1).read().bits(); }
-            2 => { let _ = r.timer0_eoi(2).read().bits(); }
+            0 => {
+                let _ = r.timer0_eoi(0).read().bits();
+            }
+            1 => {
+                let _ = r.timer0_eoi(1).read().bits();
+            }
+            2 => {
+                let _ = r.timer0_eoi(2).read().bits();
+            }
             _ => unreachable!(),
         }
     }

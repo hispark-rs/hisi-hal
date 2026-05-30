@@ -226,10 +226,7 @@ mod tests {
         // FIFO entry: data in bits 0:13, channel in bits 14:16
         // Channel 3, data = 0x2AAA (10,922)
         let val: u32 = 0x0000CAAA;
-        let sample = AdcSample {
-            data: (val & 0x3FFF) as u16,
-            channel: ((val >> 14) & 0x07) as u8,
-        };
+        let sample = AdcSample { data: (val & 0x3FFF) as u16, channel: ((val >> 14) & 0x07) as u8 };
         assert_eq!(sample.data, 0x0AAA);
         assert_eq!(sample.channel, 3);
     }
@@ -241,10 +238,7 @@ mod tests {
         let is_empty = val == 0;
         // On WS63, 0 on channel 0 is indistinguishable from empty FIFO
         assert!(is_empty); // documents the ambiguity
-        let sample = AdcSample {
-            data: (val & 0x3FFF) as u16,
-            channel: ((val >> 14) & 0x07) as u8,
-        };
+        let sample = AdcSample { data: (val & 0x3FFF) as u16, channel: ((val >> 14) & 0x07) as u8 };
         assert_eq!(sample.data, 0);
         assert_eq!(sample.channel, 0);
     }
@@ -268,10 +262,7 @@ mod tests {
     fn test_fifo_data_max_value() {
         // Maximum 14-bit data value
         let val: u32 = 0x3FFF; // all data bits set, channel 0
-        let sample = AdcSample {
-            data: (val & 0x3FFF) as u16,
-            channel: ((val >> 14) & 0x07) as u8,
-        };
+        let sample = AdcSample { data: (val & 0x3FFF) as u16, channel: ((val >> 14) & 0x07) as u8 };
         assert_eq!(sample.data, 0x3FFF);
         assert_eq!(sample.channel, 0);
     }
@@ -289,8 +280,8 @@ mod tests {
 
 #[cfg(test)]
 mod proptests {
+    use super::{AdcChannel, AdcSample};
     use proptest::prelude::*;
-    use super::{AdcSample, AdcChannel};
 
     proptest! {
         /// Fuzz: Any u32 value parsed as FIFO entry produces valid channel range.

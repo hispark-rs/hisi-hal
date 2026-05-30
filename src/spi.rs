@@ -214,7 +214,9 @@ mod tests {
         div = div.saturating_sub(1);
         // 240M/2 = 120M, minus 1 = 119,999,999 > 0xFFFF → clamped
         assert!(div > 0xFFFF); // before clamp
-        if div > 0xFFFF { div = 0xFFFF; }
+        if div > 0xFFFF {
+            div = 0xFFFF;
+        }
         assert_eq!(div, 0xFFFF); // after clamp
     }
 
@@ -225,7 +227,9 @@ mod tests {
         let mut div = pclk / (2 * freq);
         div = div.saturating_sub(1);
         // 120000 minus 1 = 119999, above max → clamped
-        if div > 0xFFFF { div = 0xFFFF; }
+        if div > 0xFFFF {
+            div = 0xFFFF;
+        }
         assert_eq!(div, 0xFFFF);
     }
 }

@@ -31,16 +31,14 @@ const MMIO_LOW: usize = 0x4000_0000;
 const MMIO_HIGH: usize = 0x5704_0000; // ULP_GPIO at 0x5703_0000
 
 // Verify key peripheral addresses are within range
-const_assert!(0x4401_0000 >= MMIO_LOW && 0x4401_2000 <= MMIO_HIGH,
-    "UART region (UART0@0x4401_0000..UART2@0x4401_2000) out of MMIO range");
-const_assert!(0x4000_6000 >= MMIO_LOW && 0x4000_6100 <= MMIO_HIGH,
-    "WDT region (0x4000_6000) out of MMIO range");
-const_assert!(0x4800_0000 >= MMIO_LOW && 0x4800_0100 <= MMIO_HIGH,
-    "SFC base out of MMIO range");
-const_assert!(0x4A00_0000 >= MMIO_LOW && 0x4A00_0000 <= MMIO_HIGH,
-    "DMA base out of MMIO range");
-const_assert!(0x4410_0000 >= MMIO_LOW && 0x4411_4000 <= MMIO_HIGH,
-    "Crypto base out of MMIO range");
+const_assert!(
+    0x4401_0000 >= MMIO_LOW && 0x4401_2000 <= MMIO_HIGH,
+    "UART region (UART0@0x4401_0000..UART2@0x4401_2000) out of MMIO range"
+);
+const_assert!(0x4000_6000 >= MMIO_LOW && 0x4000_6100 <= MMIO_HIGH, "WDT region (0x4000_6000) out of MMIO range");
+const_assert!(0x4800_0000 >= MMIO_LOW && 0x4800_0100 <= MMIO_HIGH, "SFC base out of MMIO range");
+const_assert!(0x4A00_0000 >= MMIO_LOW && 0x4A00_0000 <= MMIO_HIGH, "DMA base out of MMIO range");
+const_assert!(0x4410_0000 >= MMIO_LOW && 0x4411_4000 <= MMIO_HIGH, "Crypto base out of MMIO range");
 
 // ── Verify PeripheralGuard ref-count array bounds ─────────────────
 
@@ -54,7 +52,6 @@ use crate::clock::PERIPHERAL_COUNT;
 // and this assertion value.
 const_assert!(PERIPHERAL_COUNT == 17, "clock.rs PERIPHERAL_COUNT must match Peripheral enum variant count");
 
-
 // Verify Peripheral enum discriminant fits in AtomicU8 index
 #[allow(dead_code)]
 fn verify_peripheral_count() {
@@ -64,39 +61,31 @@ fn verify_peripheral_count() {
 
 // ── Verify timer channel count ───────────────────────────────────
 
-const_assert!(crate::soc::ws63::TIMER_COUNT == 3,
-    "TIMER_COUNT must be 3 for timer0_eoi(0..2) indexing");
-const_assert!(crate::soc::ws63::PWM_CHANNEL_COUNT == 8,
-    "PWM_CHANNEL_COUNT must be 8 for PWM register indexing");
+const_assert!(crate::soc::ws63::TIMER_COUNT == 3, "TIMER_COUNT must be 3 for timer0_eoi(0..2) indexing");
+const_assert!(crate::soc::ws63::PWM_CHANNEL_COUNT == 8, "PWM_CHANNEL_COUNT must be 8 for PWM register indexing");
 
 // ── Verify DMA channel count ─────────────────────────────────────
 
-const_assert!(crate::soc::ws63::DMA_CHANNEL_COUNT == 4,
-    "DMA_CHANNEL_COUNT must be 4 for DmaDriver channel indexing");
-const_assert!(crate::soc::ws63::SPI_COUNT == 2,
-    "SPI_COUNT must be 2 for SPI0/SPI1 instance indexing");
-const_assert!(crate::soc::ws63::UART_COUNT == 3,
-    "UART_COUNT must be 3 for UART0/1/2 instance indexing");
-const_assert!(crate::soc::ws63::I2C_COUNT == 2,
-    "I2C_COUNT must be 2 for I2C0/1 instance indexing");
+const_assert!(crate::soc::ws63::DMA_CHANNEL_COUNT == 4, "DMA_CHANNEL_COUNT must be 4 for DmaDriver channel indexing");
+const_assert!(crate::soc::ws63::SPI_COUNT == 2, "SPI_COUNT must be 2 for SPI0/SPI1 instance indexing");
+const_assert!(crate::soc::ws63::UART_COUNT == 3, "UART_COUNT must be 3 for UART0/1/2 instance indexing");
+const_assert!(crate::soc::ws63::I2C_COUNT == 2, "I2C_COUNT must be 2 for I2C0/1 instance indexing");
 
 // ── Verify timer tick arithmetic doesn't overflow at compile time ─
 
-const_assert!(crate::soc::ws63::SYSTEM_CLOCK_HZ == 240_000_000,
-    "SYSTEM_CLOCK_HZ must be 240MHz — timer tick calculations assume this");
+const_assert!(
+    crate::soc::ws63::SYSTEM_CLOCK_HZ == 240_000_000,
+    "SYSTEM_CLOCK_HZ must be 240MHz — timer tick calculations assume this"
+);
 // Verify that the maximum safe us value for timer is computable at 240MHz
 const MAX_SAFE_TIMER_US: u64 = u32::MAX as u64 / 240;
-const_assert!(MAX_SAFE_TIMER_US > 17_000_000,
-    "Timer max safe period must cover at least 17 seconds");
+const_assert!(MAX_SAFE_TIMER_US > 17_000_000, "Timer max safe period must cover at least 17 seconds");
 
 // ── Verify flash memory constants ─────────────────────────────────
 
-const_assert!(crate::soc::ws63::GPIO_COUNT == 19,
-    "GPIO_COUNT must be 19 for GPIO pin 0-18 indexing");
-const_assert!(crate::soc::ws63::ULP_GPIO_COUNT == 8,
-    "ULP_GPIO_COUNT must be 8 for ULP GPIO pin indexing");
-const_assert!(crate::soc::ws63::LSADC_CHANNEL_COUNT == 6,
-    "LSADC_CHANNEL_COUNT must be 6 for ADC channel indexing");
+const_assert!(crate::soc::ws63::GPIO_COUNT == 19, "GPIO_COUNT must be 19 for GPIO pin 0-18 indexing");
+const_assert!(crate::soc::ws63::ULP_GPIO_COUNT == 8, "ULP_GPIO_COUNT must be 8 for ULP GPIO pin indexing");
+const_assert!(crate::soc::ws63::LSADC_CHANNEL_COUNT == 6, "LSADC_CHANNEL_COUNT must be 6 for ADC channel indexing");
 
 // ── Type-level safety invariant helpers ──────────────────────────
 

@@ -180,20 +180,10 @@ mod tests {
 
     #[test]
     fn test_efuse_boot_status_complete() {
-        let sts = EfuseStatus {
-            man_status: 0,
-            boot0_done: true,
-            boot1_done: true,
-            boot2_done: true,
-        };
+        let sts = EfuseStatus { man_status: 0, boot0_done: true, boot1_done: true, boot2_done: true };
         assert!(sts.boot_complete());
 
-        let partial = EfuseStatus {
-            man_status: 0,
-            boot0_done: true,
-            boot1_done: false,
-            boot2_done: true,
-        };
+        let partial = EfuseStatus { man_status: 0, boot0_done: true, boot1_done: false, boot2_done: true };
         assert!(!partial.boot_complete());
     }
 

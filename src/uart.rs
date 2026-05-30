@@ -282,11 +282,7 @@ macro_rules! impl_nb_serial {
                 Ok(())
             }
             fn flush(&mut self) -> nb::Result<(), Self::Error> {
-                if self.tx_flushed($idx) {
-                    Ok(())
-                } else {
-                    Err(nb::Error::WouldBlock)
-                }
+                if self.tx_flushed($idx) { Ok(()) } else { Err(nb::Error::WouldBlock) }
             }
         }
     };

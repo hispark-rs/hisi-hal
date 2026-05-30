@@ -218,7 +218,7 @@ impl<T> I2c<'_, T> {
         operations: &mut [embedded_hal::i2c::Operation<'_>],
     ) -> Result<(), I2cError> {
         let r = i2c_regs(self.idx);
-        let addr_w = (address as u32) << 1;      // R/W=0 for write
+        let addr_w = (address as u32) << 1; // R/W=0 for write
         let addr_r = ((address as u32) << 1) | 1; // R/W=1 for read
 
         for op in operations.iter_mut() {
@@ -333,7 +333,7 @@ mod tests {
 
     #[test]
     fn test_i2c_address_write_read_differ_by_one_bit() {
-        let addr_w = (0x48u32) << 1;       // 0x90
+        let addr_w = (0x48u32) << 1; // 0x90
         let addr_r = ((0x48u32) << 1) | 1; // 0x91
         assert_eq!(addr_r, addr_w | 1);
         assert_eq!(addr_w & 0x01, 0); // Write bit cleared

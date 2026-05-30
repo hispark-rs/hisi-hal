@@ -103,11 +103,7 @@ impl TcxoFreq {
     pub fn detect() -> Self {
         // SAFETY: HW_CTL (0x4000_0014) is a valid physical MMIO register per fbb_ws63
         let hw_ctl = unsafe { HW_CTL.read_volatile() };
-        if hw_ctl & 0x01 == 0 {
-            TcxoFreq::MHz24
-        } else {
-            TcxoFreq::MHz40
-        }
+        if hw_ctl & 0x01 == 0 { TcxoFreq::MHz24 } else { TcxoFreq::MHz40 }
     }
 
     /// Return the frequency in Hz.
@@ -169,12 +165,7 @@ pub struct SystemClocks {
 impl SystemClocks {
     /// Default clocks (assumes boot ROM has configured PLL).
     pub const fn assumed() -> Self {
-        Self {
-            cpu_clk: SYSTEM_CLOCK_HZ,
-            pclk: SYSTEM_CLOCK_HZ,
-            tcxo_freq: TcxoFreq::MHz40,
-            pll_locked: true,
-        }
+        Self { cpu_clk: SYSTEM_CLOCK_HZ, pclk: SYSTEM_CLOCK_HZ, tcxo_freq: TcxoFreq::MHz40, pll_locked: true }
     }
 }
 
@@ -212,14 +203,14 @@ pub fn init_clocks(_sys_ctl0: &SysCtl0<'_>, _cldo_crg: &CldoCrg<'_>) -> SystemCl
     // (fbb_ws63: switch_flash_clock_to_pll in soc_porting.c)
     // SAFETY: CMU_NEW_CFG1 (0x4000_34A4), CLDO_CRG_CLK_SEL (0x4400_1134)
     // are valid physical MMIO addresses per fbb_ws63 register map.
-    unsafe { CMU_NEW_CFG1.write_volatile(0x1) };       // CPU_DIV_FLASH_RSTN_SYNC
+    unsafe { CMU_NEW_CFG1.write_volatile(0x1) }; // CPU_DIV_FLASH_RSTN_SYNC
     for _ in 0..tcxo_freq.hz() / 1_000_000 / 3 {
-        core::hint::spin_loop();                           // delay 1µs
+        core::hint::spin_loop(); // delay 1µs
     }
-    unsafe { CMU_NEW_CFG1.write_volatile(0x3) };       // CPU_DIV_FLASH_RSTN
+    unsafe { CMU_NEW_CFG1.write_volatile(0x3) }; // CPU_DIV_FLASH_RSTN
     unsafe {
         let val = clk_sel_ptr.read_volatile();
-        clk_sel_ptr.write_volatile(val | (1 << 18));      // bit 18: flash → PLL
+        clk_sel_ptr.write_volatile(val | (1 << 18)); // bit 18: flash → PLL
     }
 
     // ── Step 2: Switch UART clocks to PLL ───────────────────
@@ -244,7 +235,7 @@ pub fn init_clocks(_sys_ctl0: &SysCtl0<'_>, _cldo_crg: &CldoCrg<'_>) -> SystemCl
     // (fbb_ws63: spi_porting.c sets CLDO_CRG_CLK_SEL bit 6)
     unsafe {
         let val = clk_sel_ptr.read_volatile();
-        clk_sel_ptr.write_volatile(val | (1 << 6));           // bit 6: SPI → PLL
+        clk_sel_ptr.write_volatile(val | (1 << 6)); // bit 6: SPI → PLL
     }
 
     // ── Step 4: Verify PLL lock ─────────────────────────────
