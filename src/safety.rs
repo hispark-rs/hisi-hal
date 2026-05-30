@@ -12,7 +12,9 @@ macro_rules! const_assert {
     ($cond:expr, $msg:expr) => {
         const _: () = {
             #[allow(dead_code, clippy::unit_arg)]
-            const ASSERT: () = if !$cond { panic!($msg) };
+            const ASSERT: () = if !$cond {
+                panic!($msg)
+            };
         };
     };
 }

@@ -32,8 +32,6 @@ macro_rules! peripheral {
             }
 
             /// Return a reference to the PAC register block.
-            #[inline]
-            /// Return a reference to the PAC register block.
             ///
             /// # Safety
             /// The PAC pointer must be valid. It points to a static physical
