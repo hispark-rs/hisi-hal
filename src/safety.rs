@@ -44,10 +44,16 @@ const_assert!(0x4410_0000 >= MMIO_LOW && 0x4411_4000 <= MMIO_HIGH,
 
 // ── Verify PeripheralGuard ref-count array bounds ─────────────────
 
-const PERIPHERAL_COUNT: usize = 17;
+// PERIPHERAL_COUNT is defined in clock.rs next to the Peripheral enum.
+// Reference it here so the const_assert below breaks if anyone changes
+// the count in one place but not the other.
+use crate::clock::PERIPHERAL_COUNT;
 
-// Verify the REF_COUNTS array size matches the Peripheral enum variant count
-const_assert!(PERIPHERAL_COUNT == 17, "REF_COUNTS must have 17 entries (one per Peripheral variant)");
+// Verify that the Peripheral enum still has 17 variants.
+// If adding a new peripheral variant, update clock.rs PERIPHERAL_COUNT
+// and this assertion value.
+const_assert!(PERIPHERAL_COUNT == 17, "clock.rs PERIPHERAL_COUNT must match Peripheral enum variant count");
+
 
 // Verify Peripheral enum discriminant fits in AtomicU8 index
 #[allow(dead_code)]

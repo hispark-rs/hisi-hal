@@ -67,9 +67,13 @@ impl Peripheral {
     }
 }
 
-static REF_COUNTS: [AtomicU8; 17] = {
+/// Number of Peripheral enum variants (= REF_COUNTS array size).
+/// Must be updated when adding new Peripheral variants.
+pub const PERIPHERAL_COUNT: usize = 17;
+
+static REF_COUNTS: [AtomicU8; PERIPHERAL_COUNT] = {
     const ZERO: AtomicU8 = AtomicU8::new(0);
-    [ZERO; 17]
+    [ZERO; PERIPHERAL_COUNT]
 };
 
 /// RAII guard that enables a peripheral clock on creation.
@@ -95,7 +99,9 @@ impl Drop for PeripheralGuard<'_> {
     fn drop(&mut self) {
         let idx = self.peripheral as usize;
         // fetch_sub returns the OLD value. If old == 1, we're the last guard.
+        // Underflow (prev==0) means double-drop or bug — caught by debug_assert.
         let prev = REF_COUNTS[idx].fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(prev > 0, "PeripheralGuard double-drop detected");
         if prev == 1 {
             // Actually disable the clock in hardware (last guard dropped)
             // SAFETY: cldo_crg is a raw pointer to the CLDO_CRG MMIO register block
@@ -195,9 +201,14 @@ impl<'d> ClockControl<'d> {
         self.write_cken_bit(0, bit, true);
     }
 
-    pub fn enable_spi(&self) {
-        self.write_cken_bit(1, 25, true);
-    }
+    /// Enable the clock gate for SPI0.
+    pub fn enable_spi0(&self) { self.write_cken_bit(1, 25, true); }
+
+    /// Enable the clock gate for SPI1.
+    pub fn enable_spi1(&self) { self.write_cken_bit(1, 26, true); }
+
+    /// Enable the clock gate for both SPI0 and SPI1.
+    pub fn enable_spi(&self) { self.enable_spi0(); self.enable_spi1(); }
 
     pub fn enable_pwm(&self) {
         // PWM has 9 contiguous bits (2:10) — needs bulk write
@@ -240,7 +251,10 @@ impl<'d> ClockControl<'d> {
     /// If guards exist, this is a no-op to avoid corrupting the RAII system.
     pub fn disable_peripheral(&self, peripheral: Peripheral) {
         let idx = peripheral as usize;
-        let count = REF_COUNTS[idx].load(Ordering::Relaxed);
+        // Use load-acquire to ensure all prior guard operations are visible.
+        // Interrupt-racing guard creation between load and disable is a known
+        // TOCTOU — callers must ensure no concurrent guard creation.
+        let count = REF_COUNTS[idx].load(Ordering::Acquire);
         if count > 0 {
             return; // Guards are active, do not force-disable
         }
