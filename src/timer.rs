@@ -332,7 +332,6 @@ mod proptests {
     proptest! {
         /// Fuzz: Timer ticks calculation never panics for any u32 input.
         #[test]
-        #[test]
         fn timer_ticks_never_panics(us in any::<u32>()) {
             let ticks64: u64 = 240_000_000u64 * us as u64 / 1_000_000;
             let ticks = if ticks64 > u32::MAX as u64 { u32::MAX } else { ticks64 as u32 };

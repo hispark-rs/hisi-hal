@@ -143,15 +143,13 @@ impl<'d> LsAdc<'d> {
         }
     }
 
-    /// Check if ADC FIFO data is available.
+    /// Check if ADC FIFO data is available (non-destructive).
     ///
-    /// **Note: This method is destructive.** Reading the FIFO data register
-    /// consumes a sample. The correct pattern is to call `read_sample()` directly
-    /// rather than using `data_ready()` as a guard — `read_sample()` handles
-    /// the FIFO state correctly.
-    #[deprecated(note = "Destructive read — use `read_sample()` directly instead")]
+    /// Reads the `rne` (FIFO Not Empty) bit from `LSADC_CTRL_1` without consuming
+    /// any data from the FIFO. Safe to call before `read_sample()`.
     pub fn data_ready(&self) -> bool {
-        self.read_sample().is_some()
+        // Bit 3 of lsadc_ctrl_1 is `rne` (FIFO Not Empty), per vendor SDK
+        self.regs().lsadc_ctrl_1().read().bits() & (1 << 3) != 0
     }
 
     /// Read a single ADC sample from the FIFO.

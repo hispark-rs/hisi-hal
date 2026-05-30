@@ -315,6 +315,7 @@ impl<'d, T: DmaInstance> DmaDriver<'d, T> {
 
     /// Issue a software burst request for a channel.
     pub fn burst_request(&mut self, channel: u8) {
+        assert!(channel < 4);
         unsafe {
             Self::regs().dmac_burst_req().write(|w| w.bits(1 << channel));
         }
@@ -322,6 +323,7 @@ impl<'d, T: DmaInstance> DmaDriver<'d, T> {
 
     /// Issue a software single request for a channel.
     pub fn single_request(&mut self, channel: u8) {
+        assert!(channel < 4);
         unsafe {
             Self::regs().dmac_single_req().write(|w| w.bits(1 << channel));
         }
@@ -345,6 +347,7 @@ impl<'d, T: DmaInstance> DmaDriver<'d, T> {
 
     /// Clear transfer complete interrupt for a channel.
     pub fn clear_transfer_interrupt(&mut self, channel: u8) {
+        assert!(channel < 4);
         unsafe {
             Self::regs().dmac_int_clr().write(|w| w.bits(1 << channel));
         }
@@ -352,6 +355,7 @@ impl<'d, T: DmaInstance> DmaDriver<'d, T> {
 
     /// Clear error interrupt for a channel.
     pub fn clear_error_interrupt(&mut self, channel: u8) {
+        assert!(channel < 4);
         unsafe {
             Self::regs().dmac_int_clr().write(|w| w.bits(1 << (channel + 8)));
         }

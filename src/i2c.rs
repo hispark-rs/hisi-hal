@@ -37,6 +37,7 @@ impl<'d> I2c<'d, I2c1<'d>> {
 fn configure_i2c(idx: u8, freq: u32) {
     let r = i2c_regs(idx);
     let pclk = crate::soc::ws63::SYSTEM_CLOCK_HZ;
+    let freq = if freq == 0 { 1 } else { freq };
     let period = pclk / (2 * freq);
     let half = period / 2;
     r.i2c_scl_h().write(|w| unsafe { w.bits(half) });
@@ -114,7 +115,6 @@ impl<T> I2c<'_, T> {
 
         // Start + address (R/W=0)
         self.send_start((addr as u32) << 1, false)?;
-        self.clear_interrupts();
 
         // Write data bytes
         for &byte in data {
@@ -138,7 +138,6 @@ impl<T> I2c<'_, T> {
 
         // Start + address (R/W=1)
         self.send_start(((addr as u32) << 1) | 1, true)?;
-        self.clear_interrupts();
 
         // Read bytes
         let buf_len = buf.len();
@@ -172,7 +171,6 @@ impl<T> I2c<'_, T> {
         if !wr_buf.is_empty() {
             // Start + address (R/W=0)
             self.send_start((addr as u32) << 1, false)?;
-            self.clear_interrupts();
 
             // Write register address / data bytes
             for &byte in wr_buf {
@@ -187,7 +185,6 @@ impl<T> I2c<'_, T> {
         if !rd_buf.is_empty() {
             // Repeated START + address (R/W=1)
             self.send_start(((addr as u32) << 1) | 1, true)?;
-            self.clear_interrupts();
 
             let buf_len = rd_buf.len();
             for (i, byte) in rd_buf.iter_mut().enumerate() {
@@ -224,16 +221,10 @@ impl<T> I2c<'_, T> {
         let addr_w = (address as u32) << 1;      // R/W=0 for write
         let addr_r = ((address as u32) << 1) | 1; // R/W=1 for read
 
-        for (idx, op) in operations.iter_mut().enumerate() {
-            let is_first = idx == 0;
-
+        for op in operations.iter_mut() {
             match op {
                 embedded_hal::i2c::Operation::Write(data) => {
-                    if is_first {
-                        self.send_start(addr_w, false)?;
-                    } else {
-                        self.send_start(addr_w, false)?;
-                    }
+                    self.send_start(addr_w, false)?;
                     self.clear_interrupts();
 
                     for &byte in data.iter() {
@@ -245,11 +236,7 @@ impl<T> I2c<'_, T> {
                     // NO STOP between operations — next START will be repeated START
                 }
                 embedded_hal::i2c::Operation::Read(buf) => {
-                    if is_first {
-                        self.send_start(addr_r, true)?;
-                    } else {
-                        self.send_start(addr_r, true)?;
-                    }
+                    self.send_start(addr_r, true)?;
                     self.clear_interrupts();
 
                     let buf_len = buf.len();
@@ -326,8 +313,6 @@ impl embedded_hal::i2c::I2c for I2c<'_, I2c1<'_>> {
         self.transaction_impl(address, operations)
     }
 }
-
-fn _i2c_op(_addr: u8) {}
 
 // ── Tests ──────────────────────────────────────────────────────
 

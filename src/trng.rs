@@ -61,7 +61,9 @@ impl<'d> TrngDriver<'d> {
     /// Read a random word, blocking until data is available.
     ///
     /// Returns `Err(Timeout)` if the TRNG fails to produce entropy after
-    /// ~1ms (retries exhausted).
+    /// ~4ms (1,000,000 spin-loop iterations at 240MHz). On cold start,
+    /// the FRO-based entropy source may need several attempts to stabilize;
+    /// retry the call if the first attempt times out.
     pub fn read_blocking(&self) -> Result<u32, TrngError> {
         for _ in 0..1_000_000 {
             if self.data_ready() {

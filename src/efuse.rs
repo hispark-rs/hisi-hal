@@ -110,8 +110,9 @@ impl<'d> EfuseDriver<'d> {
         unsafe {
             self.regs().efuse_ctl_data().write(|w| w.bits(ctl as u32));
         }
-        // Brief delay for the hardware to latch OTP data into the register
-        for _ in 0..10 {
+        // Delay for the hardware to latch OTP data into the register
+        // (100 iterations ≈ 400ns at 240MHz, matches clock peripheral delay pattern)
+        for _ in 0..100 {
             core::hint::spin_loop();
         }
         self.regs().efuse_ctl_data().read().bits()

@@ -180,6 +180,12 @@ impl<'d> ClockControl<'d> {
         }
     }
 
+    fn read_cken_bit(&self, reg: u8, bit: u8) -> bool {
+        let cken = self.cldo_crg.register_block();
+        let bits = if reg == 0 { cken.cken_ctl0().read().bits() } else { cken.cken_ctl1().read().bits() };
+        (bits & (1 << bit)) != 0
+    }
+
     // ── Individual clock enable methods ────────────────────────────
 
     pub fn enable_uart(&self, uart_idx: usize) {
@@ -278,18 +284,24 @@ impl<'d> ClockControl<'d> {
         if matches!(peripheral, Peripheral::Pwm) {
             let cken = self.cldo_crg.register_block();
             let bits = cken.cken_ctl0().read();
+            let pwm_orig = bits.bits() & (0x1FF << 2); // save original PWM enable state
             cken.cken_ctl0().write(|w| unsafe { w.bits(bits.bits() & !(0x1FF << 2)) });
             for _ in 0..100 {
                 core::hint::spin_loop();
             }
-            cken.cken_ctl0().write(|w| unsafe { w.bits(bits.bits() | (0x1FF << 2)) });
+            // Restore only the originally-enabled PWM bits, preserving other fields
+            let current = cken.cken_ctl0().read();
+            cken.cken_ctl0().write(|w| unsafe { w.bits(current.bits() | pwm_orig) });
         } else {
             let (reg, bit) = peripheral.cken_info();
+            // Save original enable state
+            let orig = self.read_cken_bit(reg, bit);
             self.write_cken_bit(reg, bit, false);
             for _ in 0..100 {
                 core::hint::spin_loop();
             }
-            self.write_cken_bit(reg, bit, true);
+            // Restore original enable state, don't force-enable
+            self.write_cken_bit(reg, bit, orig);
         }
     }
 }

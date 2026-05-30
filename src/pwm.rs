@@ -19,6 +19,7 @@ impl<'d> PwmChannel<'d> {
     }
 
     pub fn configure(&mut self, freq: u32, duty_percent: u8) {
+        assert!(freq > 0, "PWM frequency must be non-zero");
         let r = self.regs();
         let pclk = crate::soc::ws63::SYSTEM_CLOCK_HZ;
         let period = pclk / freq;
