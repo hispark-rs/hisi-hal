@@ -147,6 +147,11 @@ impl<T> Uart<'_, T> {
         while !r.fifo_status().read().tx_fifo_empty().bit_is_set() {}
     }
 
+    /// Non-blocking check: returns true if TX FIFO is fully drained.
+    pub fn tx_flushed(&self, idx: u8) -> bool {
+        uart_regs(idx).fifo_status().read().tx_fifo_empty().bit_is_set()
+    }
+
     pub fn write(&self, idx: u8, data: &[u8]) {
         for &b in data {
             self.write_byte(idx, b);
@@ -271,8 +276,11 @@ macro_rules! impl_nb_serial {
                 Ok(())
             }
             fn flush(&mut self) -> nb::Result<(), Self::Error> {
-                self.flush_tx($idx);
-                Ok(())
+                if self.tx_flushed($idx) {
+                    Ok(())
+                } else {
+                    Err(nb::Error::WouldBlock)
+                }
             }
         }
     };
