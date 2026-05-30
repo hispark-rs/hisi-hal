@@ -91,9 +91,10 @@ unsafe impl Sync for PeripheralGuard<'_> {}
 impl Drop for PeripheralGuard<'_> {
     fn drop(&mut self) {
         let idx = self.peripheral as usize;
-        let count = REF_COUNTS[idx].load(Ordering::Relaxed);
-        if count <= 1 {
-            // Actually disable the clock in hardware
+        // fetch_sub returns the OLD value. If old == 1, we're the last guard.
+        let prev = REF_COUNTS[idx].fetch_sub(1, Ordering::Relaxed);
+        if prev == 1 {
+            // Actually disable the clock in hardware (last guard dropped)
             let cken = unsafe { &*(self.cldo_crg as *const ws63_pac::cldo_crg::RegisterBlock) };
             let (reg, bit) = self.peripheral.cken_info();
             if matches!(self.peripheral, Peripheral::Pwm) {
@@ -106,9 +107,6 @@ impl Drop for PeripheralGuard<'_> {
                 let bits = cken.cken_ctl1().read();
                 cken.cken_ctl1().write(|w| unsafe { w.bits(bits.bits() & !(1 << bit)) });
             }
-            REF_COUNTS[idx].store(0, Ordering::Relaxed);
-        } else {
-            REF_COUNTS[idx].store(count - 1, Ordering::Relaxed);
         }
     }
 }
@@ -137,10 +135,12 @@ impl<'d> ClockControl<'d> {
     }
 
     /// Create a RAII peripheral clock guard.
+    ///
+    /// Uses atomic fetch_add to avoid TOCTOU race with interrupt handlers.
     pub fn peripheral_guard(&self, peripheral: Peripheral) -> PeripheralGuard<'_> {
         let idx = peripheral as usize;
-        let count = REF_COUNTS[idx].load(Ordering::Relaxed);
-        if count == 0 {
+        let old = REF_COUNTS[idx].fetch_add(1, Ordering::Relaxed);
+        if old == 0 {
             // PWM has 9 contiguous bits (2:10) — bulk-enable all of them
             match peripheral {
                 Peripheral::Pwm => self.enable_pwm(),
@@ -150,7 +150,6 @@ impl<'d> ClockControl<'d> {
                 }
             }
         }
-        REF_COUNTS[idx].store(count + 1, Ordering::Relaxed);
         let cldo_ptr = self.cldo_crg.register_block() as *const ws63_pac::cldo_crg::RegisterBlock as *const ();
         PeripheralGuard { peripheral, cldo_crg: cldo_ptr, _marker: PhantomData }
     }
