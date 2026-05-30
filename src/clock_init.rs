@@ -1,8 +1,50 @@
 //! Clock initialization for WS63.
 //!
-//! Provides system clock tree configuration based on the fbb_ws63 C SDK
-//! reference (soc_porting.c, pm_porting.c). Handles TCXO detection,
-//! PLL switching, and clock divider setup.
+//! Based on the fbb_ws63 C SDK boot sequence analysis:
+//!
+//! ## What the boot ROM / bootloader does
+//!
+//! The flashboot bootloader (`flashboot_ws63/startup/main.c`) runs before
+//! the application and performs:
+//!
+//! 1. `boot_clock_adapt()` — detects TCXO (24/40MHz), configures UART/WDT tick rates
+//! 2. `switch_flash_clock_to_pll()` — sets CLDO_CRG_CLK_SEL bit 18 to switch
+//!    the **flash controller** clock source from TCXO to PLL. Does NOT switch
+//!    CPU, UART, or other peripheral clocks.
+//! 3. Initializes watchdog, eFuse, SPI flash, partition table
+//! 4. Loads and jumps to the application image
+//!
+//! The **CPU PLL** (240MHz) is configured by the boot ROM before the bootloader
+//! runs. The bootloader inherits this configuration.
+//!
+//! ## What the application must do
+//!
+//! The application-level `clock_init.c` in the LiteOS SDK performs:
+//!
+//! 1. `switch_clock()` — switches peripheral clocks from TCXO to PLL:
+//!    - UART0/1/2: CLDO_CRG_CLK_SEL bits 1,2,3
+//!    - WiFi MAC: bit 20, WiFi PHY: bit 19
+//!    - RF_CTL: bit 0
+//!    - SPI: bit 6 (spi_porting.c)
+//! 2. `set_uart_tcxo_clock_period()` — configures UART baud base, timer tick,
+//!    watchdog period, I2C clock based on detected TCXO frequency
+//!
+//! For a bare-metal Rust application (no LiteOS), we provide:
+//! - `probe_clocks()` — non-invasive: detect TCXO and PLL status
+//! - `init_clocks()` — full init: switch flash to PLL + switch UART/SPI to PLL
+//!
+//! # CLDO_CRG_CLK_SEL bit map (from fbb_ws63 clock_init.c)
+//!
+//! | Bit | Peripheral | Description |
+//! |-----|-----------|-------------|
+//! | 0 | RF_CTL | RF control clock → PLL |
+//! | 1 | UART0 | UART0 clock → PLL |
+//! | 2 | UART1 | UART1 clock → PLL |
+//! | 3 | UART2 | UART2 clock → PLL |
+//! | 6 | SPI | SPI clock → PLL |
+//! | 18 | FLASH | Flash/SFC controller → PLL |
+//! | 19 | WiFi PHY | WiFi PHY clock → PLL |
+//! | 20 | WiFi MAC | WiFi MAC clock → PLL |
 //!
 //! # Register map (from fbb_ws63)
 //!
@@ -10,9 +52,9 @@
 //! |----------|---------|-------------|
 //! | HW_CTL | 0x4000_0014 | TCXO frequency detect (bit[0]: 0=24MHz, 1=40MHz) |
 //! | REG_EXCEP_RO_RG | 0x4000_319C | PLL lock status (bit 12) |
-//! | REG_CMU_FNPLL_SIG | 0x4000_342C | CMU PLL signal (bit 15 = PD) |
 //! | CMU_NEW_CFG1 | 0x4000_34A4 | Flash clock control |
-//! | CLDO_CRG_CLK_SEL | 0x4400_1134 | Clock source select (bit 18 = PLL) |
+//! | CLDO_CRG_CLK_SEL | 0x4400_1134 | Clock source select |
+//! | CLDO_SUB_CRG_CKEN_CTL1 | 0x4400_1104 | UART clock gate control |
 //!
 //! # Clock tree (from ws63-guide ch2_system.md)
 //!
@@ -137,41 +179,72 @@ impl SystemClocks {
 
 /// Initialize the system clock tree.
 ///
-/// Performs the clock initialization sequence from fbb_ws63:
-/// 1. Detect TCXO frequency (24 or 40 MHz)
-/// 2. Switch flash clock to PLL
-/// 3. Verify PLL lock
-/// 4. Configure peripheral clock gates if needed
+/// Performs the full clock initialization sequence from fbb_ws63:
+///
+/// 1. Detect TCXO frequency (24 or 40 MHz) via HW_CTL register
+/// 2. Switch flash clock to PLL (bootloader already did this, but we re-apply)
+///    — CMU_NEW_CFG1 sequence + CLDO_CRG_CLK_SEL bit 18
+/// 3. Switch UART0/1/2 clocks from TCXO to PLL
+///    — Disable UART clock gates → set CLDO_CRG_CLK_SEL bits 1,2,3 → re-enable gates
+/// 4. Switch SPI clock to PLL — set CLDO_CRG_CLK_SEL bit 6
+/// 5. Verify PLL lock via REG_EXCEP_RO_RG bit 12
 ///
 /// # Arguments
 ///
-/// * `sys_ctl0` — SYS_CTL0 peripheral (for PLL status registers).
-/// * `cldo_crg` — CLDO_CRG peripheral (for clock select).
+/// * `_sys_ctl0` — SYS_CTL0 peripheral (reserved for future PLL config).
+/// * `_cldo_crg` — CLDO_CRG peripheral (reserved for future divider config).
 ///
 /// # Returns
 ///
 /// The resolved [`SystemClocks`] configuration.
+///
+/// # Safety
+///
+/// This writes to raw MMIO registers. Should only be called once at boot,
+/// before any peripheral drivers are initialized.
 pub fn init_clocks(_sys_ctl0: &SysCtl0<'_>, _cldo_crg: &CldoCrg<'_>) -> SystemClocks {
     let tcxo_freq = TcxoFreq::detect();
+    let clk_sel_ptr = 0x4400_1134 as *mut u32;
+    let clk_gate_ptr = 0x4400_1104 as *mut u32; // CLDO_SUB_CRG_CKEN_CTL1
 
-    // Switch flash clock to PLL (fbb_ws63: switch_flash_clock_to_pll)
-    // Step 1: CMU_NEW_CFG1 = CPU_DIV_FLASH_RSTN_SYNC (0x1)
-    unsafe { CMU_NEW_CFG1.write_volatile(0x1) };
-    // Step 2: Delay 1 µs
+    // ── Step 1: Switch flash clock to PLL ────────────────────
+    // (fbb_ws63: switch_flash_clock_to_pll in soc_porting.c)
+    unsafe { CMU_NEW_CFG1.write_volatile(0x1) };       // CPU_DIV_FLASH_RSTN_SYNC
     for _ in 0..tcxo_freq.hz() / 1_000_000 / 3 {
-        core::hint::spin_loop();
+        core::hint::spin_loop();                           // delay 1µs
     }
-    // Step 3: CMU_NEW_CFG1 = CPU_DIV_FLASH_RSTN (0x3)
-    unsafe { CMU_NEW_CFG1.write_volatile(0x3) };
-    // Step 4: Set CLDO_CRG_CLK_SEL bit 18 (select PLL as clock source)
+    unsafe { CMU_NEW_CFG1.write_volatile(0x3) };       // CPU_DIV_FLASH_RSTN
     unsafe {
-        // CLDO_CRG_CLK_SEL is at absolute address 0x4400_1134
-        let clk_sel_ptr = 0x4400_1134 as *mut u32;
         let val = clk_sel_ptr.read_volatile();
-        clk_sel_ptr.write_volatile(val | (1 << 18));
+        clk_sel_ptr.write_volatile(val | (1 << 18));      // bit 18: flash → PLL
     }
 
-    // Verify PLL lock (fbb_ws63: check_cmu_lock_status)
+    // ── Step 2: Switch UART clocks to PLL ───────────────────
+    // (fbb_ws63: switch_clock in clock_init.c)
+    unsafe {
+        // Disable UART clock gates (bits 18,19,20 in CLDO_SUB_CRG_CKEN_CTL1)
+        let mut gate = clk_gate_ptr.read_volatile();
+        gate &= !((1 << 18) | (1 << 19) | (1 << 20));
+        clk_gate_ptr.write_volatile(gate);
+
+        // Set CLDO_CRG_CLK_SEL bits 1,2,3: UART0/1/2 → PLL
+        let mut sel = clk_sel_ptr.read_volatile();
+        sel |= (1 << 1) | (1 << 2) | (1 << 3);
+        clk_sel_ptr.write_volatile(sel);
+
+        // Re-enable UART clock gates
+        gate |= (1 << 18) | (1 << 19) | (1 << 20);
+        clk_gate_ptr.write_volatile(gate);
+    }
+
+    // ── Step 3: Switch SPI clock to PLL ─────────────────────
+    // (fbb_ws63: spi_porting.c sets CLDO_CRG_CLK_SEL bit 6)
+    unsafe {
+        let val = clk_sel_ptr.read_volatile();
+        clk_sel_ptr.write_volatile(val | (1 << 6));           // bit 6: SPI → PLL
+    }
+
+    // ── Step 4: Verify PLL lock ─────────────────────────────
     let pll_locked = match wait_pll_lock(30, 1000) {
         PllStatus::Locked => true,
         PllStatus::Unlocked => false,

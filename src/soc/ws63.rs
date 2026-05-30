@@ -5,15 +5,23 @@ pub use ws63_pac::interrupt::ExternalInterrupt as Interrupt;
 
 /// System clock frequency (240 MHz).
 ///
-/// # Clock initialization note
+/// # Clock initialization
 ///
-/// This value assumes the boot ROM has already configured the PLL for 240 MHz
-/// operation. On hardware, verify the actual PLL configuration. If the PLL is
-/// not set, the CPU runs from the internal RC oscillator (~16-32 MHz), and all
-/// baud-rate / SPI-clock / timer calculations will be wrong.
+/// **Boot ROM configures the CPU PLL to 240 MHz before loading the application.**
 ///
-/// To configure the PLL manually, use the CLDO_CRG clock divider and PLL
-/// configuration registers before creating any peripheral drivers.
+/// The fbb_ws63 flashboot bootloader sequence:
+/// 1. `boot_clock_adapt()` — detects TCXO (24/40 MHz) via HW_CTL bit[0],
+///    configures UART baud base and WDT tick counter to match TCXO freq
+/// 2. `switch_flash_clock_to_pll()` — sets CLDO_CRG_CLK_SEL bit[18] to switch
+///    the flash/SFC controller clock from TCXO to PLL
+/// 3. Jumps to application entry point
+///
+/// **What the application must do:** switch peripheral clocks (UART, SPI, I2C)
+/// from TCXO to PLL source. Use `clock_init::init_clocks()` for this.
+///
+/// If the PLL is NOT locked (unlikely, indicates hardware issue), the CPU
+/// runs from the TCXO at 24 or 40 MHz. All timing calculations will be wrong.
+/// Call `clock_init::probe_clocks()` to verify.
 pub const SYSTEM_CLOCK_HZ: u32 = 240_000_000;
 
 /// Number of GPIO pins (19: GPIO0[7:0] + GPIO1[15:8] + GPIO2[18:16]).
