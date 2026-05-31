@@ -1,16 +1,68 @@
-//! eFuse (OTP Controller) driver for WS63.
+//! eFuse (OTP) driver for WS63 — v151 controller.
 //!
-//! The WS63 eFuse controller manages access to one-time-programmable (OTP)
-//! memory used for storing chip configuration, calibration data, and
-//! security keys.
+//! Register map and access sequence are cross-checked against the WS63 C SDK
+//! (`hal_efuse_v151.c`, `hal_efuse_v151_reg_op.h`, `efuse_porting.c`):
 //!
-//! # Read/write control
+//! - **Status** `EFUSE_STS` at base+0x2C (boot-done flags, read-only).
+//! - **Control block** at base+0x30: `EFUSE_CTL_DATA` (mode select), +0x34
+//!   `EFUSE_CLK_PERIOD`, +0x3C `EFUSE_AVDD_CTL` (program-voltage switch).
+//! - **Data window** at base+0x800: 128 × 32-bit words, each packing two eFuse
+//!   bytes (even byte address in `[7:0]`, odd in `[15:8]`). Word index =
+//!   `byte_addr / 2`.
 //!
-//! The eFuse is controlled via a 16-bit control data field plus a
-//! read/write direction bit. The actual OTP array access is managed
-//! by the hardware with specific timing requirements.
+//! An access is *armed* by writing a 16-bit magic to `EFUSE_CTL_DATA`:
+//! `0x5A5A` = read mode, `0xA5A5` = program mode (`HAL_EFUSE_READ_MODE` /
+//! `HAL_EFUSE_WRITE_MODE`). A read then loads the latched word from the window;
+//! a program raises AVDD, writes the byte, and lowers AVDD with timing delays.
+//!
+//! # Safety / status
+//!
+//! This driver has **not been validated on silicon**. Programming an eFuse is a
+//! one-time, irreversible operation; [`EfuseDriver::write_byte`] is provided for
+//! completeness but should be treated as experimental.
 
 use crate::peripherals::Efuse;
+
+/// Magic written to `EFUSE_CTL_DATA` to arm a read (`HAL_EFUSE_READ_MODE`).
+const EFUSE_READ_MAGIC: u32 = 0x5A5A;
+/// Magic written to `EFUSE_CTL_DATA` to arm a program (`HAL_EFUSE_WRITE_MODE`).
+const EFUSE_WRITE_MAGIC: u32 = 0xA5A5;
+/// eFuse array size for one region: 2048 bits = 256 bytes
+/// (`EFUSE_REGION_MAX_BITS` in the SDK).
+pub const EFUSE_MAX_BYTES: u16 = 256;
+/// Settle delay around a program pulse (`HAL_EFUSE_DELAY_US`).
+const EFUSE_PROGRAM_DELAY_US: u32 = 100;
+
+/// Word index into the data window for a given eFuse byte address.
+///
+/// Each 32-bit window word holds two consecutive eFuse bytes, so the word
+/// index is `byte_addr / 2` (the SDK computes `(offset >> 1) << 2` as a byte
+/// offset, i.e. `word_index * 4`).
+#[inline]
+const fn word_index(byte_addr: u16) -> usize {
+    (byte_addr / 2) as usize
+}
+
+/// Extract one eFuse byte from a window word: even address → low byte
+/// (`[7:0]`), odd address → high byte (`[15:8]`).
+#[inline]
+const fn extract_byte(word: u32, byte_addr: u16) -> u8 {
+    if byte_addr & 1 != 0 { ((word >> 8) & 0xFF) as u8 } else { (word & 0xFF) as u8 }
+}
+
+/// Pack one eFuse byte into the window word for programming: even address →
+/// low byte, odd address → high byte (matches `hal_efuse_write_operation`).
+#[inline]
+const fn pack_byte(value: u8, byte_addr: u16) -> u32 {
+    if byte_addr & 1 != 0 { (value as u32) << 8 } else { value as u32 }
+}
+
+/// eFuse access error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EfuseError {
+    /// Byte address is outside the eFuse array (`>= EFUSE_MAX_BYTES`).
+    OutOfRange,
+}
 
 /// eFuse controller driver.
 pub struct EfuseDriver<'d> {
@@ -24,98 +76,76 @@ impl<'d> EfuseDriver<'d> {
     }
 
     fn regs(&self) -> &'static ws63_pac::efuse::RegisterBlock {
-        // SAFETY: PAC peripheral pointer is a static physical MMIO address, always valid
+        // SAFETY: PAC peripheral pointer is a static physical MMIO address, always valid.
         unsafe { &*Efuse::ptr() }
     }
 
-    /// Set the eFuse clock period.
-    ///
-    /// Controls the timing of eFuse read/write operations.
+    /// Set the eFuse clock period (cycles). The SDK uses `0x29` @ 24 MHz TCXO
+    /// and `0x19` @ 40 MHz; call before any read/program.
     pub fn set_clock_period(&mut self, period: u8) {
         unsafe {
             self.regs().efuse_clk_period().write(|w| w.bits(period as u32));
         }
     }
 
-    /// Set the control data word (lower 16 bits).
-    ///
-    /// The control data selects which eFuse word is being accessed.
-    pub fn set_control(&mut self, ctl: u16) {
-        let current = self.regs().efuse_ctl_data().read().bits();
-        // Preserve wr_rd bit, update control field
-        let wr_rd = current & 0x10000;
-        unsafe {
-            self.regs().efuse_ctl_data().write(|w| w.bits(wr_rd | (ctl as u32)));
-        }
-    }
-
-    /// Set the read/write direction: `true` = write, `false` = read.
-    pub fn set_write_mode(&mut self, write: bool) {
-        let current = self.regs().efuse_ctl_data().read().bits();
-        let ctl = current & 0xFFFF;
-        unsafe {
-            self.regs().efuse_ctl_data().write(|w| w.bits(ctl | (if write { 0x10000 } else { 0 })));
-        }
-    }
-
-    /// Read the current control data register value.
-    pub fn read_control_data(&self) -> u32 {
-        self.regs().efuse_ctl_data().read().bits()
-    }
-
-    /// Control the AVDD power switch for eFuse programming.
-    ///
-    /// * `enable` — `true` to enable AVDD for programming, `false` to disable.
-    pub fn set_avdd(&mut self, enable: bool) {
-        unsafe {
-            self.regs().efuse_avdd_ctl().write(|w| w.bits(if enable { 1 } else { 0 }));
-        }
-    }
-
-    /// Check the eFuse status.
-    ///
-    /// Returns a tuple of:
-    /// - Manufacturing status (bits 0:1)
-    /// - Boot0 done
-    /// - Boot1 done
-    /// - Boot2 done
+    /// Read the boot-done status register.
     pub fn status(&self) -> EfuseStatus {
-        let sts = self.regs().efuse_sts().read().bits();
+        let sts = self.regs().efuse_sts().read();
         EfuseStatus {
-            man_status: (sts & 0x03) as u8,
-            boot0_done: (sts & 0x04) != 0,
-            boot1_done: (sts & 0x08) != 0,
-            boot2_done: (sts & 0x10) != 0,
+            man_status: sts.man_sts().bits(),
+            boot0_done: sts.boot0_done().bit_is_set(),
+            boot1_done: sts.boot1_done().bit_is_set(),
+            boot2_done: sts.boot2_done().bit_is_set(),
         }
     }
 
-    /// Read a raw eFuse word at the given control data value.
+    /// Read a single eFuse byte at `byte_addr`.
     ///
-    /// * `ctl` — Control data value specifying which eFuse word to read.
-    ///
-    /// # Hardware sequence
-    ///
-    /// On WS63, the eFuse controller reads a word by:
-    /// 1. Writing the control word with `wr_rd=0` (read mode)
-    /// 2. Waiting for the hardware to latch the data (busy-wait delay)
-    /// 3. Reading the result from the control data register
-    ///
-    /// Note: The PAC only exposes `efuse_ctl_data` for both control write and result
-    /// read. The hardware internally latches the OTP data into this register after
-    /// the control word is written in read mode.
-    pub fn read_raw(&mut self, ctl: u16) -> u32 {
-        // Set control word with wr_rd explicitly cleared (= read mode).
-        // Do NOT preserve the existing wr_rd bit — a prior set_write_mode(true)
-        // would cause this to be a destructive write instead of a read.
+    /// Arms read mode (`0x5A5A`), then loads the latched word from the data
+    /// window and extracts the requested byte. No delay is required for reads
+    /// (matches `hal_efuse_read_byte`).
+    pub fn read_byte(&mut self, byte_addr: u16) -> Result<u8, EfuseError> {
+        if byte_addr >= EFUSE_MAX_BYTES {
+            return Err(EfuseError::OutOfRange);
+        }
         unsafe {
-            self.regs().efuse_ctl_data().write(|w| w.bits(ctl as u32));
+            self.regs().efuse_ctl_data().write(|w| w.bits(EFUSE_READ_MAGIC));
         }
-        // Delay for the hardware to latch OTP data into the register
-        // (100 iterations ≈ 400ns at 240MHz, matches clock peripheral delay pattern)
-        for _ in 0..100 {
-            core::hint::spin_loop();
+        let word = self.regs().efuse_data(word_index(byte_addr)).read().bits();
+        Ok(extract_byte(word, byte_addr))
+    }
+
+    /// Read `buf.len()` consecutive eFuse bytes starting at `start_byte`.
+    pub fn read_buffer(&mut self, start_byte: u16, buf: &mut [u8]) -> Result<(), EfuseError> {
+        for (i, slot) in buf.iter_mut().enumerate() {
+            *slot = self.read_byte(start_byte + i as u16)?;
         }
-        self.regs().efuse_ctl_data().read().bits()
+        Ok(())
+    }
+
+    /// Program a single eFuse byte (**one-time, irreversible**).
+    ///
+    /// Sequence (per `hal_efuse_write_operation`): arm write mode (`0xA5A5`),
+    /// raise AVDD, settle, write the packed byte to the window, lower AVDD,
+    /// settle. eFuse bits can only be burned 0→1; this does not erase.
+    ///
+    /// Not validated on silicon — treat as experimental.
+    pub fn write_byte(&mut self, byte_addr: u16, value: u8) -> Result<(), EfuseError> {
+        if byte_addr >= EFUSE_MAX_BYTES {
+            return Err(EfuseError::OutOfRange);
+        }
+        let delay = crate::delay::Delay::new();
+        unsafe {
+            self.regs().efuse_ctl_data().write(|w| w.bits(EFUSE_WRITE_MAGIC));
+            self.regs().efuse_avdd_ctl().write(|w| w.bits(1));
+        }
+        delay.delay_micros(EFUSE_PROGRAM_DELAY_US);
+        unsafe {
+            self.regs().efuse_data(word_index(byte_addr)).write(|w| w.bits(pack_byte(value, byte_addr)));
+            self.regs().efuse_avdd_ctl().write(|w| w.bits(0));
+        }
+        delay.delay_micros(EFUSE_PROGRAM_DELAY_US);
+        Ok(())
     }
 }
 
@@ -146,36 +176,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_efuse_read_raw_clears_wr_rd_bit() {
-        // read_raw(0x10) must write ctl=0x10 with wr_rd=0 (read mode)
-        let ctl: u16 = 0x10;
-        let val = ctl as u32; // wr_rd explicitly 0
-        assert_eq!(val & 0x10000, 0); // bit 16 (wr_rd) must be 0 for read mode
-        assert_eq!(val & 0xFFFF, 0x10); // lower 16 bits = ctl value
+    fn test_magic_values() {
+        // Mode-select magics must match the SDK exactly.
+        assert_eq!(EFUSE_READ_MAGIC, 0x5A5A);
+        assert_eq!(EFUSE_WRITE_MAGIC, 0xA5A5);
     }
 
     #[test]
-    fn test_efuse_write_mode_bit_position() {
-        // wr_rd is bit 16 (0x10000)
-        let write_mode: u32 = 0x10000;
-        let read_mode: u32 = 0x00000;
-        assert_eq!(write_mode & 0x10000, 0x10000);
-        assert_eq!(read_mode & 0x10000, 0);
+    fn test_word_index() {
+        // Two bytes per 32-bit window word.
+        assert_eq!(word_index(0), 0);
+        assert_eq!(word_index(1), 0);
+        assert_eq!(word_index(2), 1);
+        assert_eq!(word_index(3), 1);
+        assert_eq!(word_index(255), 127);
     }
 
     #[test]
-    fn test_efuse_ctl_not_mixed_with_write_mode() {
-        // After set_write_mode(true), a subsequent read_raw must not
-        // leak the write-mode bit into the control word
-        let prev_write: u32 = 0x10000; // write mode was set
-        let ctl: u16 = 0x5;
-        // Old (buggy) behavior: val = (prev_write & 0x10000) | (ctl as u32)
-        let old_buggy = (prev_write & 0x10000) | (ctl as u32);
-        assert_eq!(old_buggy, 0x10005); // WRITE mode leaked!
-        // New (fixed) behavior: val = ctl as u32 (no preservation of wr_rd)
-        let new_fixed = ctl as u32;
-        assert_eq!(new_fixed, 0x5); // clean read mode
-        assert_eq!(new_fixed & 0x10000, 0);
+    fn test_extract_byte_even_odd() {
+        let word = 0xABCD;
+        assert_eq!(extract_byte(word, 0), 0xCD); // even → low byte
+        assert_eq!(extract_byte(word, 1), 0xAB); // odd  → high byte
+        assert_eq!(extract_byte(word, 2), 0xCD); // even (word index differs)
+    }
+
+    #[test]
+    fn test_pack_byte_even_odd() {
+        assert_eq!(pack_byte(0xCD, 0), 0x00CD); // even → low byte
+        assert_eq!(pack_byte(0xAB, 1), 0xAB00); // odd  → high byte
+    }
+
+    #[test]
+    fn test_pack_extract_roundtrip() {
+        // Packing then extracting the same byte address must recover the value.
+        for addr in [0u16, 1, 42, 255] {
+            for v in [0u8, 1, 0x5A, 0xFF] {
+                assert_eq!(extract_byte(pack_byte(v, addr), addr), v);
+            }
+        }
     }
 
     #[test]
@@ -186,81 +224,36 @@ mod tests {
         let partial = EfuseStatus { man_status: 0, boot0_done: true, boot1_done: false, boot2_done: true };
         assert!(!partial.boot_complete());
     }
-
-    #[test]
-    fn test_efuse_boot_status_bits() {
-        // efuse_sts register bit layout:
-        // bit 0-1: man_status, bit 2: boot0, bit 3: boot1, bit 4: boot2
-        let sts_raw: u32 = 0x14; // boot2 done + boot0 done
-        let sts = EfuseStatus {
-            man_status: (sts_raw & 0x03) as u8,
-            boot0_done: (sts_raw & 0x04) != 0,
-            boot1_done: (sts_raw & 0x08) != 0,
-            boot2_done: (sts_raw & 0x10) != 0,
-        };
-        assert_eq!(sts.man_status, 0);
-        assert!(sts.boot0_done);
-        assert!(!sts.boot1_done);
-        assert!(sts.boot2_done);
-    }
 }
 
 // ── Property-based fuzz tests ──────────────────────────────────
 
 #[cfg(test)]
 mod proptests {
+    use super::*;
     use proptest::prelude::*;
 
     proptest! {
-        /// Fuzz: read_raw control word always has wr_rd=0 (read mode).
+        /// Fuzz: word index is always byte_addr/2 and within the 128-word window.
         #[test]
-        fn read_raw_always_clears_wr_rd(ctl in any::<u16>()) {
-            let val = ctl as u32;
-            prop_assert_eq!(val & 0x10000, 0, "wr_rd bit leaked for ctl=0x{:04X}", ctl);
-            prop_assert_eq!(val & 0xFFFF, ctl as u32);
+        fn word_index_in_range(addr in 0u16..EFUSE_MAX_BYTES) {
+            let idx = word_index(addr);
+            prop_assert_eq!(idx, (addr / 2) as usize);
+            prop_assert!(idx < 128);
         }
 
-        /// Fuzz: set_write_mode(true) sets wr_rd, set_write_mode(false) clears it.
+        /// Fuzz: pack/extract is a faithful round-trip for any byte and address.
         #[test]
-        fn set_write_mode_toggles_wr_rd(ctl in any::<u16>()) {
-            let write_val: u32 = ctl as u32 | 0x10000;
-            prop_assert_eq!(write_val & 0x10000, 0x10000);
-            let read_val: u32 = ctl as u32;
-            prop_assert_eq!(read_val & 0x10000, 0);
+        fn pack_extract_roundtrip(addr in any::<u16>(), v in any::<u8>()) {
+            prop_assert_eq!(extract_byte(pack_byte(v, addr), addr), v);
         }
 
-        /// Fuzz: Control field is always preserved after wr_rd toggling.
+        /// Fuzz: extract never reads beyond the addressed byte lane.
         #[test]
-        fn ctl_field_preserved_through_mode_switch(ctl in any::<u16>()) {
-            let write_val: u32 = ctl as u32 | 0x10000;
-            let read_val: u32 = write_val & !0x10000;
-            prop_assert_eq!((read_val & 0xFFFF) as u16, ctl);
-        }
-
-        /// Fuzz: Boot status parsing for any u32 raw value.
-        #[test]
-        fn boot_status_never_panics(raw in any::<u32>()) {
-            let sts = super::EfuseStatus {
-                man_status: (raw & 0x03) as u8,
-                boot0_done: (raw & 0x04) != 0,
-                boot1_done: (raw & 0x08) != 0,
-                boot2_done: (raw & 0x10) != 0,
-            };
-            prop_assert!(sts.man_status <= 3);
-            let _ = sts.boot_complete();
-        }
-
-        /// Fuzz: boot_complete is true iff all three boot bits are set.
-        #[test]
-        fn boot_complete_iff_all_three_bits(raw in any::<u32>()) {
-            let sts = super::EfuseStatus {
-                man_status: (raw & 0x03) as u8,
-                boot0_done: (raw & 0x04) != 0,
-                boot1_done: (raw & 0x08) != 0,
-                boot2_done: (raw & 0x10) != 0,
-            };
-            let expected = raw & 0x04 != 0 && raw & 0x08 != 0 && raw & 0x10 != 0;
-            prop_assert_eq!(sts.boot_complete(), expected);
+        fn extract_byte_lane(word in any::<u32>(), addr in any::<u16>()) {
+            let b = extract_byte(word, addr);
+            let expected = if addr & 1 != 0 { ((word >> 8) & 0xFF) as u8 } else { (word & 0xFF) as u8 };
+            prop_assert_eq!(b, expected);
         }
     }
 }

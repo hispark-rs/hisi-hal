@@ -1,14 +1,29 @@
-//! Low-Speed ADC (LSADC) driver for WS63.
+//! Low-Speed ADC (LSADC) driver for WS63 — v154 controller.
 //!
-//! The WS63 LSADC is a 12-bit SAR ADC with up to 6 input channels.
-//! It includes a FIFO for storing conversion results and supports
-//! CIC filtering, offset/gain correction, and scan mode.
+//! Register map and bit fields are cross-checked against the WS63 C SDK
+//! (`hal_adc_v154_regs_def.h`, `hal_adc_v154_regs_op.{c,h}`, `hal_adc_v154.c`).
+//! The control bank is the contiguous `adc_regs_t` struct at base `0x4400_C000`:
 //!
-//! # Data format
+//! | Register      | Offset | Purpose                                            |
+//! |---------------|--------|----------------------------------------------------|
+//! | `LSADC_CTRL_0`  | 0x00 | scan config: per-channel enable + sample timing    |
+//! | `LSADC_CTRL_1`  | 0x04 | FIFO status (`rne`/`rff`/`bsy`) + waterline        |
+//! | `LSADC_CTRL_2`  | 0x08 | interrupt mask/status                              |
+//! | `LSADC_CTRL_8`  | 0x1C | scan start/stop                                    |
+//! | `LSADC_CTRL_9`  | 0x20 | FIFO read data (`data[13:0]`, `channel[16:14]`)    |
+//! | `LSADC_CTRL_11` | 0x24 | analog enable (`da_lsadc_en`) + reset (`rstn`@16)  |
+//! | `CFG_DATA_SEL`  | 0xDC | data output select                                 |
+//! | `CFG_OFFSET`    | 0xE0 | offset correction                                  |
+//! | `CFG_GAIN`      | 0xE4 | gain correction                                    |
+//! | `CFG_CIC_FILTER_EN` | 0xE8 | CIC filter enable                              |
+//! | `CFG_CIC_OSR`   | 0xEC | CIC oversampling ratio                             |
 //!
-//! Each FIFO entry is 32 bits:
-//! - bits 0:13 — 14-bit conversion data
-//! - bits 14:16 — channel number (0-5)
+//! # Status
+//!
+//! Not validated on silicon. The full analog power-up sequence (the SDK's
+//! `hal_adc_simulation_cfg` magic writes to `da_lsadc_en` and the `da_lsadc_rwreg`
+//! registers, plus offset/cap/gain calibration) is **not** implemented here;
+//! [`LsAdc::set_analog_enable`] exposes `da_lsadc_en` for callers that port it.
 
 use crate::peripherals::Lsadc;
 
@@ -38,30 +53,53 @@ impl AdcChannel {
     }
 }
 
-/// Configuration for an ADC channel.
+/// Averaging mode (`equ_model_sel`, `LSADC_CTRL_0[7:6]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Averaging {
+    /// 1 sample averaged.
+    One = 0,
+    /// 2 samples averaged.
+    Two = 1,
+    /// 4 samples averaged.
+    Four = 2,
+    /// 8 samples averaged.
+    Eight = 3,
+}
+
+/// Scan-mode sample timing (`LSADC_CTRL_0`). Defaults match the SDK's
+/// `hal_adc_auto_scan_mode_set` (8× averaging, `sample_cnt=8`, `start_cnt=0x18`).
 #[derive(Debug, Clone, Copy)]
 pub struct AdcConfig {
-    /// Number of samples per conversion (0-15, maps to 1-16 samples).
+    /// Averaging mode (`equ_model_sel`, 2-bit).
+    pub averaging: Averaging,
+    /// Sample count (`sample_cnt`, 5-bit).
     pub sample_count: u8,
-    /// Number of start cycles.
+    /// Start count (`start_cnt` / SDK `satrt_cnt`, 8-bit).
     pub start_count: u8,
-    /// Number of cast cycles.
+    /// Cast count (`cast_cnt`, 7-bit).
     pub cast_count: u8,
 }
 
 impl Default for AdcConfig {
     fn default() -> Self {
-        Self { sample_count: 7, start_count: 3, cast_count: 3 }
+        Self { averaging: Averaging::Eight, sample_count: 0x8, start_count: 0x18, cast_count: 0x0 }
     }
 }
 
 /// ADC conversion result.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdcSample {
-    /// 14-bit conversion data.
+    /// 14-bit conversion code.
     pub data: u16,
-    /// Channel that produced this sample.
+    /// Channel that produced this sample (0-5).
     pub channel: u8,
+}
+
+/// Parse a raw `LSADC_CTRL_9` word into a sample: `data` = bits `[13:0]`,
+/// `channel` = bits `[16:14]` (matches `adc_fifo_data_str` in the SDK).
+#[inline]
+const fn parse_sample(raw: u32) -> AdcSample {
+    AdcSample { data: (raw & 0x3FFF) as u16, channel: ((raw >> 14) & 0x07) as u8 }
 }
 
 /// LSADC driver.
@@ -76,142 +114,106 @@ impl<'d> LsAdc<'d> {
     }
 
     fn regs(&self) -> &'static ws63_pac::lsadc::RegisterBlock {
-        // SAFETY: PAC peripheral pointer is a static physical MMIO address, always valid
+        // SAFETY: PAC peripheral pointer is a static physical MMIO address, always valid.
         unsafe { &*Lsadc::ptr() }
     }
 
-    /// Enable the ADC peripheral (release reset and enable clock).
+    /// Release the analog reset (`LSADC_CTRL_11.da_lsadc_rstn = 1`, active-low).
     pub fn enable(&mut self) {
-        let r = self.regs();
-
-        // Clear reset (da_lsadc_rstn = 1)
-        unsafe {
-            r.lsadc_ctrl_7().write(|w| w.bits(0x01));
-        }
+        self.regs().lsadc_ctrl_11().modify(|_, w| w.da_lsadc_rstn().set_bit());
     }
 
-    /// Disable the ADC peripheral.
+    /// Assert the analog reset (`LSADC_CTRL_11.da_lsadc_rstn = 0`).
     pub fn disable(&mut self) {
-        unsafe {
-            self.regs().lsadc_ctrl_7().write(|w| w.bits(0x00));
-        }
+        self.regs().lsadc_ctrl_11().modify(|_, w| w.da_lsadc_rstn().clear_bit());
     }
 
-    /// Enable specific ADC channels.
+    /// Write the 16-bit analog-enable field (`LSADC_CTRL_11.da_lsadc_en`).
     ///
-    /// The channel mask is a 16-bit value where each bit enables
-    /// one of the 6 channels (bits 16:21 in LSADC_CTRL_7).
-    pub fn enable_channels(&mut self, channel_mask: u16) {
-        let r = self.regs();
-        let current = r.lsadc_ctrl_7().read().bits();
-        // Only bits 0:15 hold da_lsadc_en, but the PAC explorer says bits 16:31
-        let ch_en = ((channel_mask & 0x3F) as u32) << 16;
-        unsafe {
-            r.lsadc_ctrl_7().write(|w| w.bits(current | ch_en));
-        }
+    /// The SDK power-up sequence ORs in `0x7000`, `0xE7F`, `0x100`, `0x80`
+    /// across several steps; this exposes the raw field for porting it.
+    pub fn set_analog_enable(&mut self, bits: u16) {
+        self.regs().lsadc_ctrl_11().modify(|_, w| unsafe { w.da_lsadc_en().bits(bits) });
     }
 
-    /// Configure the ADC sampling parameters.
-    pub fn configure(&mut self, config: &AdcConfig) {
-        let r = self.regs();
-
-        let mut ctrl1: u32 = 0;
-        ctrl1 |= (config.sample_count as u32 & 0x0F) << 8;
-        ctrl1 |= (config.start_count as u32 & 0x0F) << 16;
-        ctrl1 |= (config.cast_count as u32 & 0x0F) << 24;
-
-        unsafe {
-            r.lsadc_ctrl_1().write(|w| w.bits(ctrl1));
-        }
+    /// Enable a channel and program the scan timing (`LSADC_CTRL_0`).
+    ///
+    /// Sets the per-channel enable bit (preserving any already-enabled channels)
+    /// and the averaging/sample/start/cast counts, matching
+    /// `hal_adc_auto_scan_mode_set`.
+    pub fn configure_scan(&mut self, channel: AdcChannel, config: &AdcConfig) {
+        self.regs().lsadc_ctrl_0().modify(|r, w| {
+            let ch = r.channel().bits() | (1 << (channel as u8));
+            unsafe {
+                w.channel().bits(ch);
+                w.equ_model_sel().bits(config.averaging as u8);
+                w.sample_cnt().bits(config.sample_count & 0x1F);
+                w.start_cnt().bits(config.start_count);
+                w.cast_cnt().bits(config.cast_count & 0x7F)
+            }
+        });
     }
 
-    /// Start an ADC scan.
+    /// Start an ADC scan (`LSADC_CTRL_8.lsadc_start = 1`).
     pub fn start_scan(&mut self) {
-        let r = self.regs();
-        // lsadc_start = 1 (bit 0)
-        unsafe {
-            r.lsadc_ctrl_6().write(|w| w.bits(0x01));
-        }
+        self.regs().lsadc_ctrl_8().write(|w| w.lsadc_start().set_bit());
     }
 
-    /// Stop an ADC scan.
+    /// Stop an ADC scan (`LSADC_CTRL_8.lsadc_stop = 1`).
     pub fn stop_scan(&mut self) {
-        let r = self.regs();
-        // lsadc_stop = 1 (bit 1)
-        unsafe {
-            r.lsadc_ctrl_6().write(|w| w.bits(0x02));
-        }
+        self.regs().lsadc_ctrl_8().write(|w| w.lsadc_stop().set_bit());
     }
 
-    /// Check if ADC FIFO data is available (non-destructive).
+    /// Set the RX-FIFO interrupt waterline (`LSADC_CTRL_1.rxintsize`, 3-bit).
+    pub fn set_fifo_waterline(&mut self, level: u8) {
+        self.regs().lsadc_ctrl_1().modify(|_, w| unsafe { w.rxintsize().bits(level & 0x07) });
+    }
+
+    /// True if the RX FIFO holds at least one sample (`LSADC_CTRL_1.rne`).
     ///
-    /// Reads the `rne` (FIFO Not Empty) bit from `LSADC_CTRL_1` without consuming
-    /// any data from the FIFO. Safe to call before `read_sample()`.
+    /// This is the reliable empty check — read it before [`Self::read_sample`].
     pub fn data_ready(&self) -> bool {
-        // Bit 3 of lsadc_ctrl_1 is `rne` (FIFO Not Empty), per vendor SDK
-        self.regs().lsadc_ctrl_1().read().bits() & (1 << 3) != 0
+        self.regs().lsadc_ctrl_1().read().rne().bit_is_set()
     }
 
-    /// Read a single ADC sample from the FIFO.
+    /// Read one sample from the FIFO (`LSADC_CTRL_9`).
     ///
-    /// Returns `None` if the FIFO appears empty (all bits zero, which is the
-    /// hardware reset value of the data register). On WS63, an empty FIFO read
-    /// returns 0x00000000, which is distinguishable from valid readings only
-    /// if the application does not expect 0V on channel 0. Applications
-    /// expecting to measure 0V should poll a separate mechanism (e.g.,
-    /// interrupt-based notification) to know when a conversion is complete.
+    /// Returns `None` when the FIFO is empty (checked via `rne`), so a genuine
+    /// 0-code reading is **not** mistaken for "no data".
     pub fn read_sample(&self) -> Option<AdcSample> {
-        let val = self.regs().lsadc_fifo_data().read().bits();
-        // On WS63, reading an empty FIFO returns 0x00000000 (hardware reset value).
-        // We use 0 as a heuristic for "no data" since the combined (data, channel)
-        // field being all-zero means either:
-        //   (a) empty FIFO (most common); or
-        //   (b) valid 0V reading on channel 0 (extremely rare)
-        // Applications measuring near-ground voltages should use interrupt-driven
-        // notification rather than polling for empty FIFO detection.
-        if val == 0 {
+        if !self.data_ready() {
             return None;
         }
-        Some(AdcSample { data: (val & 0x3FFF) as u16, channel: ((val >> 14) & 0x07) as u8 })
+        Some(parse_sample(self.regs().lsadc_ctrl_9().read().bits()))
     }
 
-    /// Enable the CIC filter with a given oversampling ratio.
+    /// Enable the CIC filter with the given oversampling ratio.
     pub fn enable_cic_filter(&mut self, oversampling_ratio: u8) {
         let r = self.regs();
         unsafe {
-            r.cfg_cic_osr().write(|w| w.bits(oversampling_ratio as u32 & 0xFF));
-            r.cfg_cic_filter_en().write(|w| w.bits(0x01));
+            r.cfg_cic_osr().write(|w| w.cic_osr().bits(oversampling_ratio));
         }
+        r.cfg_cic_filter_en().write(|w| w.cic_filter_en().set_bit());
     }
 
     /// Disable the CIC filter.
     pub fn disable_cic_filter(&mut self) {
-        unsafe {
-            self.regs().cfg_cic_filter_en().write(|w| w.bits(0x00));
-        }
+        self.regs().cfg_cic_filter_en().write(|w| w.cic_filter_en().clear_bit());
     }
 
-    /// Set the ADC offset correction value.
+    /// Set the ADC offset correction value (`CFG_OFFSET`).
     pub fn set_offset(&mut self, offset: u16) {
-        unsafe {
-            self.regs().cfg_offset().write(|w| w.bits(offset as u32 & 0xFFFF));
-        }
+        self.regs().cfg_offset().write(|w| unsafe { w.offset().bits(offset) });
     }
 
-    /// Set the ADC gain correction value.
+    /// Set the ADC gain correction value (`CFG_GAIN`).
     pub fn set_gain(&mut self, gain: u16) {
-        unsafe {
-            self.regs().cfg_gain().write(|w| w.bits(gain as u32 & 0xFFFF));
-        }
+        self.regs().cfg_gain().write(|w| unsafe { w.gain().bits(gain) });
     }
 
-    /// Set the data output selection.
-    ///
-    /// `true` = post-processed data, `false` = raw ADC data.
+    /// Select the data source: `true` = post-processed, `false` = raw ADC code.
     pub fn set_data_select(&mut self, processed: bool) {
-        unsafe {
-            self.regs().cfg_data_sel().write(|w| w.bits(if processed { 1 } else { 0 }));
-        }
+        self.regs().cfg_data_sel().write(|w| w.data_sel().bit(processed));
     }
 }
 
@@ -222,49 +224,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_fifo_data_parsing() {
-        // FIFO entry: data in bits 0:13, channel in bits 14:16
-        // Channel 3, data = 0x2AAA (10,922)
-        let val: u32 = 0x0000CAAA;
-        let sample = AdcSample { data: (val & 0x3FFF) as u16, channel: ((val >> 14) & 0x07) as u8 };
-        assert_eq!(sample.data, 0x0AAA);
-        assert_eq!(sample.channel, 3);
+    fn test_parse_sample_data_and_channel() {
+        // channel 3, code 0x0AAA  ->  raw = (3 << 14) | 0x0AAA
+        let raw: u32 = (3 << 14) | 0x0AAA;
+        let s = parse_sample(raw);
+        assert_eq!(s.data, 0x0AAA);
+        assert_eq!(s.channel, 3);
     }
 
     #[test]
-    fn test_fifo_data_channel_0_zero_volts() {
-        // Channel 0, data = 0 — this is ambiguous with "no data"
-        let val: u32 = 0x00000000;
-        let is_empty = val == 0;
-        // On WS63, 0 on channel 0 is indistinguishable from empty FIFO
-        assert!(is_empty); // documents the ambiguity
-        let sample = AdcSample { data: (val & 0x3FFF) as u16, channel: ((val >> 14) & 0x07) as u8 };
-        assert_eq!(sample.data, 0);
-        assert_eq!(sample.channel, 0);
+    fn test_parse_sample_max_code() {
+        let s = parse_sample(0x3FFF); // all data bits, channel 0
+        assert_eq!(s.data, 0x3FFF);
+        assert_eq!(s.channel, 0);
     }
 
     #[test]
-    fn test_fifo_data_channel_bounds() {
-        // Channel field is 3 bits (0-7), hardware uses 0-5
-        for ch in 0..=7u32 {
-            let val = ch << 14; // only channel bits set, data=0
-            let channel = ((val >> 14) & 0x07) as u8;
-            if ch <= 5 {
-                assert_eq!(channel, ch as u8);
-            } else {
-                // Channels 6-7 are reserved but should still parse
-                assert_eq!(channel, ch as u8);
-            }
-        }
-    }
-
-    #[test]
-    fn test_fifo_data_max_value() {
-        // Maximum 14-bit data value
-        let val: u32 = 0x3FFF; // all data bits set, channel 0
-        let sample = AdcSample { data: (val & 0x3FFF) as u16, channel: ((val >> 14) & 0x07) as u8 };
-        assert_eq!(sample.data, 0x3FFF);
-        assert_eq!(sample.channel, 0);
+    fn test_parse_sample_channel_field_is_3_bits() {
+        // bits above [16:14] must not leak into channel
+        let raw: u32 = 0xFFFF_FFFF;
+        let s = parse_sample(raw);
+        assert_eq!(s.channel, 0x07);
+        assert_eq!(s.data, 0x3FFF);
     }
 
     #[test]
@@ -274,50 +255,49 @@ mod tests {
         assert_eq!(AdcChannel::from_index(6), None);
         assert_eq!(AdcChannel::from_index(255), None);
     }
+
+    #[test]
+    fn test_default_config_matches_sdk() {
+        let c = AdcConfig::default();
+        assert_eq!(c.averaging as u8, 3); // AVERAGE_OF_EIGHT_SAMPLES
+        assert_eq!(c.sample_count, 0x8);
+        assert_eq!(c.start_count, 0x18);
+        assert_eq!(c.cast_count, 0x0);
+    }
 }
 
 // ── Property-based fuzz tests ──────────────────────────────────
 
 #[cfg(test)]
 mod proptests {
-    use super::{AdcChannel, AdcSample};
+    use super::*;
     use proptest::prelude::*;
 
     proptest! {
-        /// Fuzz: Any u32 value parsed as FIFO entry produces valid channel range.
+        /// Fuzz: channel field is always within 3 bits regardless of input.
         #[test]
-        fn fifo_channel_always_0_to_7(raw in any::<u32>()) {
-            let channel = ((raw >> 14) & 0x07) as u8;
-            prop_assert!(channel <= 7, "channel {} extracted from raw 0x{:08X}", channel, raw);
+        fn parse_channel_always_3_bits(raw in any::<u32>()) {
+            prop_assert!(parse_sample(raw).channel <= 0x07);
         }
 
-        /// Fuzz: Data field always fits in 14 bits.
+        /// Fuzz: data field is always within 14 bits.
         #[test]
-        fn fifo_data_always_14_bits(raw in any::<u32>()) {
-            let data = (raw & 0x3FFF) as u16;
-            prop_assert!(data <= 0x3FFF, "data 0x{:04X} extracted from raw 0x{:08X}", data, raw);
+        fn parse_data_always_14_bits(raw in any::<u32>()) {
+            prop_assert!(parse_sample(raw).data <= 0x3FFF);
         }
 
-        /// Fuzz: AdcSample construction never panics on any u32.
+        /// Fuzz: data and channel are extracted from the correct, disjoint lanes.
         #[test]
-        fn adc_sample_construction_never_panics(raw in any::<u32>()) {
-            let sample = AdcSample {
-                data: (raw & 0x3FFF) as u16,
-                channel: ((raw >> 14) & 0x07) as u8,
-            };
-            prop_assert!(sample.channel <= 7);
-            prop_assert!(sample.data <= 0x3FFF);
+        fn parse_sample_lanes(raw in any::<u32>()) {
+            let s = parse_sample(raw);
+            prop_assert_eq!(s.data, (raw & 0x3FFF) as u16);
+            prop_assert_eq!(s.channel, ((raw >> 14) & 0x07) as u8);
         }
 
-        /// Fuzz: AdcChannel::from_index returns Some for 0-5, None for 6-255.
+        /// Fuzz: AdcChannel::from_index returns Some for 0-5, None otherwise.
         #[test]
         fn channel_from_index_coverage(idx in any::<u8>()) {
-            let ch = super::AdcChannel::from_index(idx);
-            if idx <= 5 {
-                prop_assert!(ch.is_some(), "idx={} should be valid", idx);
-            } else {
-                prop_assert!(ch.is_none(), "idx={} should be invalid", idx);
-            }
+            prop_assert_eq!(AdcChannel::from_index(idx).is_some(), idx <= 5);
         }
     }
 }
