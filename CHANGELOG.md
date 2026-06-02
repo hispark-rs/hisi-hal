@@ -1,11 +1,60 @@
 # Changelog
 
-All notable changes to ws63-hal will be documented in this file.
+All notable changes to this project are documented here.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-06-02
+
+### Added
+
+- **SDMA logical channel mapping** (`dma.rs`): Map logical channels 8-11 to physical channels 0-3 with proper request ID dispatch
+- **DMA flow control**: Wire flow control configuration for peripheral request IDs per dma_porting.h
+- **GPIO pull/interrupt triggers** (`gpio.rs`): Apply pull configuration and interrupt trigger modes (Phase 2)
+- **I2C bounded timeouts** (`i2c.rs`): Add timeout bounding to I2C operations preventing indefinite waits
+- **System reset** (`system.rs`): Implement real system reset (replacing PLIC-era stubs)
+- **Interrupt handling rewrite** (`interrupt.rs`): Rewrite for WS63 custom-CSR local INTC (no PLIC dependency)
+- **Test infrastructure**: Unit tests compile and run on host (cargo test --target x86_64)
+- **ARCHITECTURE.md**: Document codebase architecture and design patterns
+
+### Changed
+
+- **Interrupt module**: Complete rewrite for WS63 custom CSR controller (no PLIC compatibility)
+- **DMA peripheral request IDs**: Corrected to match WS63 C SDK dma_porting.h register definitions
+- **SPI driver**: Corrected trsm field handling (TX&RX=0, was incorrectly 0b11 for EEPROM reads), SCKDV divisor calculation, added wait timeouts
+- **EFUSE driver**: Corrected register access patterns to match WS63 C SDK behavior
+- **LSADC driver**: Corrected register access patterns to match WS63 C SDK behavior
+- **Code quality**: Resolved all clippy warnings with -D warnings flag for Rust 1.96
+
+### Fixed
+
+- Removed duplicate `#[inline]` in peripheral! macro
+- Suppressed clippy warnings in const_assert! and ptr_aligned! macros
+- Registry ws63-pac dependency (unified single PAC import)
+- Portable-atomic critical-section polyfill for no-atomic RISC-V ISA
+- I2C ACK check, repeated START condition handling
+- SPI division-by-zero edge case
+- Clock initialization: Accurate boot ROM PLL facts from C SDK
+- Serial flush: Made non-blocking in nb::serial trait
+- Timer overflow handling in periodic timer mode
+- PWM bit field calculations
+- Reference-count TOCTOU vulnerability in atomic fetch_add/fetch_sub
+- Baud rate clamping edge cases
+- Clock drop guard lifecycle issues
+- Flex pin state management
+- MMIO address assertions in safety.rs
+- Code review fixes: 28 bugs across 20 files (includes prior fixes)
+- 80 additional unit tests + 14 const_assert checks + 17 proptest fuzz tests
+- PERIPHERAL_COUNT off-by-one error
+- SPI asymmetry in CS handling
+
+### Removed
+
+- Unused `paste` crate dependency
+- Private apply_pull documentation linkage (CI Docs fix)
+- Pinned Cargo.lock from repository (CI consistency)
+
+## [0.1.0] - 2026-05-28
 
 ### Added
 
@@ -57,7 +106,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **prelude**: Expanded from 8 to 27 re-exports
 - **soc/ws63**: Added `ULP_GPIO_COUNT`, `LSADC_CHANNEL_COUNT`, `TCXO_COUNTER_WIDTH`, `RTC_COUNTER_WIDTH`
 - Made `soc` module and `Peripheral::cken_info()` public for testability
-- formatted entire codebase with `cargo fmt`
+- Formatted entire codebase with `cargo fmt`
 
 ### Fixed
 

@@ -1,6 +1,6 @@
 [package]
 name = "ws63-hal"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Hardware Abstraction Layer for HiSilicon WS63 (RISC-V RV32IMFC_Zicsr)"
 license = "MIT"
