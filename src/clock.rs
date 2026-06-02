@@ -3,9 +3,19 @@
 //! The WS63 uses a CLDO_CRG (Clock and Reset Generator) for peripheral clock
 //! gating. Clocks default to **enabled** out of reset, so the drivers do not
 //! gate them; this module keeps the [`Peripheral`] enum and its CKEN bit map
-//! ([`Peripheral::cken_info`]) as the authoritative peripheral → clock-gate
-//! reference (verified against the WS63 SVD / fbb_ws63), used by `safety.rs`'s
-//! drift checks and available to future clock-gating code.
+//! ([`Peripheral::cken_info`]) as a peripheral → clock-gate reference, used by
+//! `safety.rs`'s drift checks and available to future clock-gating code.
+//!
+//! CKEN-bit provenance (audited against fbb_ws63 porting + the WS63 SVD):
+//! - **SDK/SVD-confirmed**: PWM `CKEN_CTL0` bits [10:2] (base 2; `pwm_porting.c`),
+//!   I2S `CKEN_CTL0` bit 11 (bus) + bit 12 (clk) (`sio_porting.c`), UART0/1/2
+//!   `CKEN_CTL1` bits 18/19/20 (`clock_init.c` + SVD `uart_cken[20:18]`), SPI
+//!   `CKEN_CTL1` bit 25 (`spi_porting.c` + SVD `spi_cken[25]`).
+//! - **Not individually gated by the SDK** (rely on the reset-default clock; the
+//!   bit is not attested by the SVD or porting code): I2C, Timer, LSADC, Tsensor,
+//!   TRNG, Security, DMA, SDMA, SFC, SPI1 — the bits below are placeholders, not
+//!   verified against silicon. WiFi/BT entry gates (`CKEN_CTL1` 13 / 8–12 / 29)
+//!   are owned by the radio blobs and are not in this enum.
 //!
 //! The earlier `ClockControl` / `PeripheralGuard` RAII layer was removed: it had
 //! zero consumers (the drivers rely on the reset-default clocks) and was dead
@@ -40,24 +50,28 @@ impl Peripheral {
     ///
     /// PWM occupies 9 contiguous gates (`CKEN_CTL0` bits 2..=10); this returns
     /// its base bit (2), and a bulk write would be needed to gate all nine.
+    /// I2S returns its clk gate (bit 12); it also has a bus gate at bit 11.
+    /// See the module docs for which entries are SDK/SVD-confirmed vs placeholders.
     pub fn cken_info(&self) -> (u8, u8) {
         match self {
-            Peripheral::Pwm => (0, 2),
+            // ── SDK/SVD-confirmed gates ──
+            Peripheral::Pwm => (0, 2),    // CKEN_CTL0 [10:2], base bit 2 (pwm_porting.c)
+            Peripheral::I2s => (0, 12),   // CKEN_CTL0 bit 12 (clk); bit 11 = bus (sio_porting.c)
+            Peripheral::Uart0 => (1, 18), // SVD uart_cken[20:18] + clock_init.c
+            Peripheral::Uart1 => (1, 19),
+            Peripheral::Uart2 => (1, 20),
+            Peripheral::Spi0 => (1, 25), // SVD spi_cken[25] + spi_porting.c
+            // ── Not individually gated by the SDK (default-on); placeholders, unverified ──
             Peripheral::I2c0 => (0, 18),
             Peripheral::I2c1 => (0, 19),
             Peripheral::Timer => (0, 21),
             Peripheral::Lsadc => (0, 22),
             Peripheral::Tsensor => (0, 23),
-            Peripheral::I2s => (0, 24),
             Peripheral::Trng => (0, 25),
             Peripheral::SecurityGroup => (0, 26),
-            Peripheral::Uart0 => (1, 18),
-            Peripheral::Uart1 => (1, 19),
-            Peripheral::Uart2 => (1, 20),
             Peripheral::Dma => (1, 22),
             Peripheral::Sdma => (1, 23),
             Peripheral::Sfc => (1, 24),
-            Peripheral::Spi0 => (1, 25),
             Peripheral::Spi1 => (1, 26),
         }
     }
