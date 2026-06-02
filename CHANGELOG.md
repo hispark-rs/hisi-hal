@@ -16,6 +16,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - `timer::AsyncDelay`: `embedded_hal_async::delay::DelayNs` on a TIMER one-shot.
   - `gpio`: `embedded_hal_async::digital::Wait` for `Input` (edge/level via the GPIO IRQ).
   - `uart`: `embedded_io_async::{Read, Write}` for Uart0/1/2 (RX via the UART IRQ).
+  - `spi`: `embedded_hal_async::spi::SpiBus` for Spi0/1 (FIFO-paced; synchronous loopback on the model).
+  - `i2c`: `embedded_hal_async::i2c::I2c` for I2c0/1.
+  - `lsadc`: `LsAdc::read_async()` (bespoke; LSADC_INTR = IRQ 72).
+  - `dma`: `DmaDriver::<Dma0>::wait_transfer_done()` (bespoke; DMA_INT = IRQ 59).
+  - This covers every embedded-hal-async / embedded-io-async trait applicable to WS63
+    (DelayNs, Wait, SpiBus, I2c, Read/Write) plus the completion-IRQ peripherals.
   - Drivers expose `on_interrupt` hooks instead of installing ISRs, so enabling the
     feature never changes non-async firmware (safe under workspace feature unification).
 - **embassy support** (`embassy` feature): an `embassy-time` `Driver` for WS63 —
