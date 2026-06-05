@@ -57,11 +57,12 @@ pub const UART_CLOCK_HZ: u32 = 160_000_000;
 
 /// SPI controller input clock / SSI_CLK (160 MHz, PLL-derived).
 ///
-/// SCK = SSI_CLK / SCKDV. WS63 derives the SPI clock from the PLL (ch2 of ws63-guide
-/// lists SPI = 160 MHz; the QEMU model uses the same 160 MHz). NOTE: the vendor SDK
-/// actually programs a two-stage divider (a CLDO_CRG divider off the 480 MHz PLL,
-/// then the in-controller SCKDV); this HAL models only SCKDV against a fixed 160 MHz
-/// SSI_CLK and does not configure the CRG divider — revisit at hardware bring-up.
+/// SCK = SSI_CLK / SCKDV. WS63 derives the SPI clock from the 480 MHz FNPLL tap via
+/// a two-stage divider: a CLDO_CRG divider sets SSI_CLK (= this value, 480/3), then
+/// the in-controller SCKDV divides to SCK. `spi.rs::configure_spi_source_clock`
+/// programs the CRG divider (`DIV_CTL3`) + switches the source to PLL on init —
+/// mirroring the vendor `spi_porting_clock_init` — so this SSI_CLK is established,
+/// not just assumed. ch2 of ws63-guide lists SPI = 160 MHz; the QEMU model matches.
 pub const SPI_CLOCK_HZ: u32 = 160_000_000;
 
 /// I2C peripheral clock (= [`TCXO_HZ`], 24 MHz).

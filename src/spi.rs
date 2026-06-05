@@ -1,6 +1,8 @@
 //! SPI master driver for WS63 (SPI0/1, SSI v151).
-//! DesignWare SSI: SCK = SSI_CLK / SCKDV, SSI_CLK = 160MHz PLL-derived
-//! ([`crate::soc::ws63::SPI_CLOCK_HZ`], NOT the 240MHz CPU clock; SCKDV is even, >= 2).
+//! DesignWare SSI: SCK = SSI_CLK / SCKDV. Two-stage clock: a CLDO_CRG divider sets
+//! SSI_CLK = 160MHz off the 480MHz PLL (`configure_spi_source_clock`, mirrors the
+//! vendor `spi_porting_clock_init`), then SCKDV divides to SCK. SSI_CLK =
+//! [`crate::soc::ws63::SPI_CLOCK_HZ`] (NOT the 240MHz CPU clock; SCKDV is even, >= 2).
 
 use crate::peripherals::{Spi0, Spi1};
 use core::marker::PhantomData;
@@ -83,7 +85,50 @@ impl<'d> Spi<'d, Spi1<'d>> {
     }
 }
 
+// ── SPI clock source (CLDO_CRG two-stage divider) ───────────────────────────
+// The SPI controller input clock (SSI_CLK) is derived from the 480 MHz FNPLL tap
+// by a CLDO_CRG divider, then divided again by the in-controller SCKDV to form
+// SCK (SCK = SSI_CLK / SCKDV). The HAL targets SSI_CLK = SPI_CLOCK_HZ (160 MHz);
+// `configure_spi_source_clock` programs the CRG divider to establish it and
+// switches the SPI clock source TCXO→PLL. Mirrors fbb_ws63 `spi_porting_clock_init`
+// (480/bus_clk_MHz into DIV_CTL3[9:5]); see ws63-guide ch8 "时钟树".
+const CLDO_CRG_DIV_CTL3: usize = 0x4400_1114; // SPI source divider
+const CLDO_CRG_CLK_SEL: usize = 0x4400_1134; // bit 6 = SPI source: 1=PLL, 0=TCXO
+const CLDO_SUB_CRG_CKEN_CTL1: usize = 0x4400_1104; // bit 25 = SPI clock gate
+const SPI_PLL_ROOT_MHZ: u32 = 480; // FNPLL SPI/QSPI tap (2880 / 6)
+
+/// Establish the two-stage SPI clock: program the CLDO_CRG divider so the SPI
+/// controller input clock (SSI_CLK) = [`crate::soc::ws63::SPI_CLOCK_HZ`] off the
+/// 480 MHz PLL, then switch the SPI clock source from TCXO to PLL
+/// (gate-close → switch → gate-open). Bus-agnostic (one divider/select/gate for
+/// the whole SPI domain) and idempotent. Requires the PLL to already be locked
+/// (the app's `clock_init` does this before any driver init).
+fn configure_spi_source_clock() {
+    // CRG divider output = 480 MHz / div → div = 480 / SSI_CLK_MHz (e.g. 3 for 160 MHz).
+    let ssi_mhz = (crate::soc::ws63::SPI_CLOCK_HZ / 1_000_000).max(1);
+    let div = (SPI_PLL_ROOT_MHZ / ssi_mhz).clamp(1, 0x1F);
+    // SAFETY: fixed CLDO_CRG MMIO registers (0x4400_11xx, within the SYS_CTL1
+    // range). Word-aligned 32-bit RMW; the load-bit handshake matches the SDK.
+    unsafe {
+        let div_ctl3 = CLDO_CRG_DIV_CTL3 as *mut u32;
+        // load-disable (bit10) → set [9:5]=div, [4:0]=1 → load-enable, per the SDK.
+        let v = core::ptr::read_volatile(div_ctl3) & !(1 << 10);
+        core::ptr::write_volatile(div_ctl3, v);
+        let v = (core::ptr::read_volatile(div_ctl3) & !(0x1F << 5) & !0x1F) | ((div & 0x1F) << 5) | 0x1;
+        core::ptr::write_volatile(div_ctl3, v);
+        core::ptr::write_volatile(div_ctl3, core::ptr::read_volatile(div_ctl3) | (1 << 10));
+
+        // Gate-close → switch SPI source to PLL (CLK_SEL bit 6) → gate-open (CKEN1 bit 25).
+        let cken1 = CLDO_SUB_CRG_CKEN_CTL1 as *mut u32;
+        let clk_sel = CLDO_CRG_CLK_SEL as *mut u32;
+        core::ptr::write_volatile(cken1, core::ptr::read_volatile(cken1) & !(1 << 25));
+        core::ptr::write_volatile(clk_sel, core::ptr::read_volatile(clk_sel) | (1 << 6));
+        core::ptr::write_volatile(cken1, core::ptr::read_volatile(cken1) | (1 << 25));
+    }
+}
+
 fn configure_spi(idx: u8, config: &Config) {
+    configure_spi_source_clock();
     let r = spi_regs(idx);
     r.spi_er().write(|w| unsafe { w.bits(0) });
     let pclk = crate::soc::ws63::SPI_CLOCK_HZ;
