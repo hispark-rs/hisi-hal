@@ -75,7 +75,20 @@ pub mod km;
 pub mod lsadc;
 #[cfg(feature = "chip-ws63")]
 pub mod pke;
-#[cfg(feature = "chip-ws63")]
+// BS2X-enabled drivers (ungated below: `pwm`, `spi`, `wdt`, `ulp_gpio`). These were
+// chip-ws63-only but build for BS2X too because (a) the driver code is already
+// chip-neutral (it goes through `crate::soc::pac` aliases), (b) their peripheral
+// instances are in both `Peripherals` structs, and (c) BS2X uses the SAME IP version
+// as WS63 — PWM v151, SPI v151, WDT v151 (the fbb_bs2x vs fbb_ws63 `*_regs_def.h`
+// headers are byte-identical bar copyright comments), and `ulp_gpio` reuses the GPIO
+// v150 block that regular `gpio` already drives on BS2X (blinky). So the register
+// layout is verified, not guessed. NB: functional bring-up on BS2X silicon/QEMU is
+// still future work (the bs2x QEMU machine doesn't model these yet) — what's
+// guaranteed today is a register-correct, compiling blocking API.
+//
+// Still chip-ws63-only (different IP version or no BS2X peripheral): i2c (v150 vs
+// BS2X v151), rtc (v100 vs v150), lsadc (v154 vs v153), i2s/sfc (no BS2X instance),
+// and the clock/crypto/system stack (deeper port).
 pub mod pwm;
 #[cfg(feature = "chip-ws63")]
 pub mod rtc;
@@ -85,7 +98,6 @@ pub mod safety;
 pub mod sfc;
 #[cfg(feature = "chip-ws63")]
 pub mod spacc;
-#[cfg(feature = "chip-ws63")]
 pub mod spi;
 #[cfg(feature = "chip-ws63")]
 pub mod system;
@@ -93,9 +105,7 @@ pub mod system;
 pub mod trng;
 #[cfg(feature = "chip-ws63")]
 pub mod tsensor;
-#[cfg(feature = "chip-ws63")]
 pub mod ulp_gpio;
-#[cfg(feature = "chip-ws63")]
 pub mod wdt;
 
 pub use peripherals::Peripherals;
