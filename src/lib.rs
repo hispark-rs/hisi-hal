@@ -94,6 +94,9 @@ pub mod keyscan;
 // BS2X PDM-mic audio front-end (v150) — config-level (the PCM data path is DMA-fed).
 #[cfg(feature = "chip-bs21")]
 pub mod pdm;
+// BS2X USB 2.0 OTG (Synopsys DWC OTG) — config-level (core-ID; full stack deferred).
+#[cfg(feature = "chip-bs21")]
+pub mod usb;
 #[cfg(feature = "chip-ws63")]
 pub mod pke;
 #[cfg(feature = "chip-bs21")]

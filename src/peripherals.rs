@@ -147,6 +147,8 @@ mod bs21_only {
     peripheral!(Qdec, crate::soc::pac::Qdec);
     // PDM — the BS2X PDM-microphone audio front-end. Driver: `pdm`.
     peripheral!(Pdm, crate::soc::pac::Pdm);
+    // USB 2.0 OTG (Synopsys DWC OTG). Driver: `usb` (config-level: core-ID).
+    peripheral!(Usb, crate::soc::pac::Usb);
 }
 #[cfg(feature = "chip-bs21")]
 pub use bs21_only::*;
@@ -219,4 +221,5 @@ peripherals!(
     KEYSCAN => Keyscan,
     QDEC => Qdec,
     PDM => Pdm,
+    USB => Usb,
 );
