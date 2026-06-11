@@ -139,13 +139,11 @@ impl<T> I2c<'_, T> {
     pub fn probe(&mut self, addr: u8) -> bool {
         let r = i2c_regs(self.idx);
         self.set_target(addr);
-        unsafe {
-            // Push a read command with STOP (cmd=1, stop=1 → 0x300).
-            r.ic_data_cmd().write(|w| {
-                w.cmd().set_bit();
-                w.stop().set_bit()
-            });
-        }
+        // Push a read command with STOP (cmd=1, stop=1 → 0x300).
+        r.ic_data_cmd().write(|w| {
+            w.cmd().set_bit();
+            w.stop().set_bit()
+        });
         // Wait for the transfer to resolve: stop-detect (ACK) or tx-abort (NACK).
         let _ = wait_until(|| {
             let s = r.ic_raw_intr_stat().read();
@@ -193,15 +191,13 @@ impl<T> I2c<'_, T> {
         for (i, slot) in buf.iter_mut().enumerate() {
             let last = i + 1 == n;
             wait_until(|| r.ic_status().read().tfnf().bit_is_set())?;
-            unsafe {
-                r.ic_data_cmd().write(|w| {
-                    w.cmd().set_bit();
-                    if last {
-                        w.stop().set_bit();
-                    }
-                    w
-                });
-            }
+            r.ic_data_cmd().write(|w| {
+                w.cmd().set_bit();
+                if last {
+                    w.stop().set_bit();
+                }
+                w
+            });
             wait_until(|| r.ic_status().read().rfne().bit_is_set())?;
             if self.aborted() {
                 self.clear_abort();

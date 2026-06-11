@@ -12,8 +12,8 @@
 //! - the ANA/LDO sub-block @ `0x5703_63D0` (GADC base + 0x3D0, NOT in `bs2x-pac`):
 //!   the AFE/ADC/VREF LDO power-up;
 //! - the PMU AFE sub-block @ `0x5700_8700` (NOT in `bs2x-pac`): MTCMOS power /
-//!   isolation / reset / clock and the `afe_gadc_cfg` enable handshake;
-//! plus an AON isolation bit @ `0x5702_C230[10]`.
+//!   isolation / reset / clock and the `afe_gadc_cfg` enable handshake; plus an
+//!   AON isolation bit @ `0x5702_C230[10]`.
 //!
 //! The sub-blocks that `bs2x-pac` does not model are reached via raw pointer
 //! constants below (BS2X-correct addresses from `adc_porting.h`). The exact analog
