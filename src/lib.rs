@@ -85,8 +85,14 @@ pub mod lsadc;
 // ANA/PMU power sub-blocks (not in the PAC) via raw addresses. See gadc.rs.
 #[cfg(feature = "chip-bs21")]
 pub mod gadc;
+// BS2X-only HID peripherals (no WS63 analogue): key-matrix scanner + quadrature
+// decoder. bs2x-pac has faithful register blocks; see keyscan.rs / qdec.rs.
+#[cfg(feature = "chip-bs21")]
+pub mod keyscan;
 #[cfg(feature = "chip-ws63")]
 pub mod pke;
+#[cfg(feature = "chip-bs21")]
+pub mod qdec;
 // BS2X-enabled drivers (ungated below: `pwm`, `spi`, `wdt`, `ulp_gpio`). These were
 // chip-ws63-only but build for BS2X too because (a) the driver code is already
 // chip-neutral (it goes through `crate::soc::pac` aliases), (b) their peripheral

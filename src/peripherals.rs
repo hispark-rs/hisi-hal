@@ -141,6 +141,10 @@ mod bs21_only {
     // GADC — the BS2X 13-bit ADC (v153). No WS63 analogue (WS63 has LSADC v154),
     // so it is chip-bs21-only; the `gadc` driver wraps it.
     peripheral!(Gadc, crate::soc::pac::Gadc);
+    // BS2X-only HID peripherals (no WS63 analogue): the key-matrix scanner and the
+    // quadrature decoder. Drivers: `keyscan`, `qdec`.
+    peripheral!(Keyscan, crate::soc::pac::Keyscan);
+    peripheral!(Qdec, crate::soc::pac::Qdec);
 }
 #[cfg(feature = "chip-bs21")]
 pub use bs21_only::*;
@@ -210,4 +214,6 @@ peripherals!(
     TCXO => Tcxo,
     TRNG => Trng,
     GADC => Gadc,
+    KEYSCAN => Keyscan,
+    QDEC => Qdec,
 );
