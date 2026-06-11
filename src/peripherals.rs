@@ -145,6 +145,8 @@ mod bs21_only {
     // quadrature decoder. Drivers: `keyscan`, `qdec`.
     peripheral!(Keyscan, crate::soc::pac::Keyscan);
     peripheral!(Qdec, crate::soc::pac::Qdec);
+    // PDM — the BS2X PDM-microphone audio front-end. Driver: `pdm`.
+    peripheral!(Pdm, crate::soc::pac::Pdm);
 }
 #[cfg(feature = "chip-bs21")]
 pub use bs21_only::*;
@@ -216,4 +218,5 @@ peripherals!(
     GADC => Gadc,
     KEYSCAN => Keyscan,
     QDEC => Qdec,
+    PDM => Pdm,
 );
