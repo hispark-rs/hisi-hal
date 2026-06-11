@@ -57,7 +57,9 @@ pub mod asynch;
 pub mod clock;
 #[cfg(feature = "chip-ws63")]
 pub mod clock_init;
-#[cfg(feature = "chip-ws63")]
+// DMA: the register block + the mem-to-mem path are chip-neutral (Dma0 uses the
+// chip-neutral PAC base). Peripheral-paced flow control (DmaPeripheral request IDs)
+// is chip-ws63-only within the module; BS2X gets mem-to-mem.
 pub mod dma;
 #[cfg(feature = "chip-ws63")]
 pub mod efuse;
