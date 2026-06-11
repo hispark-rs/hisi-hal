@@ -63,7 +63,14 @@ pub mod dma;
 pub mod efuse;
 #[cfg(all(feature = "chip-ws63", feature = "embassy"))]
 pub mod embassy;
+// I2C is a DIFFERENT IP per chip: WS63 has a custom v150 core (i2c.rs), BS2X has a
+// Synopsys DesignWare v151 core (i2c_v151.rs). Both are exposed as `hal::i2c`; the
+// register blocks come from each chip's PAC (the BS2X v151 layout was rewritten
+// into BS2X.svd / bs2x-pac for this).
 #[cfg(feature = "chip-ws63")]
+pub mod i2c;
+#[cfg(feature = "chip-bs21")]
+#[path = "i2c_v151.rs"]
 pub mod i2c;
 #[cfg(feature = "chip-ws63")]
 pub mod i2s;
