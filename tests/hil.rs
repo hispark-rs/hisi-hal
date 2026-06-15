@@ -495,13 +495,12 @@ mod tests {
     #[cfg(feature = "chip-ws63")]
     #[test]
     fn i2c0_scl_config() {
-        use hal::i2c::I2c;
-        const FREQ: u32 = 100_000;
+        use hal::i2c::{I2c, Speed};
         // SAFETY: sequential single-hart run; I2C0 singleton not otherwise held.
-        let _i2c = I2c::new_i2c0(unsafe { hal::peripherals::I2c0::steal() }, FREQ);
+        let _i2c = I2c::new_i2c0(unsafe { hal::peripherals::I2c0::steal() }, Speed::Standard);
 
         let pclk = hal::soc::chip::I2C_CLOCK_HZ; // 24 MHz TCXO
-        let expected_half = (pclk / (2 * FREQ)) / 2;
+        let expected_half = (pclk / (2 * Speed::Standard.hz())) / 2;
         // SAFETY: read-only MMIO loads of the I2C0 config registers.
         let r = unsafe { &*pac::I2c0::PTR };
         assert_eq!(r.i2c_scl_h().read().bits(), expected_half, "I2C0 scl_h mismatch");
