@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **HIL suite**: five more on-target tests (`tests/hil.rs`), all passing on real
+  WS63 silicon — `i2c0_scl_config` (I2C SCL divider off the 24 MHz TCXO),
+  `pwm_configure_and_enable` (CKEN gate + 16-bit period latch),
+  `wdt_configure_saturates_load` (validates the WDT load u64-saturation fix:
+  300 s clamps to `WDT_MAX_LOAD`), `i2s_version_live` (I2S block clocked +
+  register-map liveness, silicon version 0x13), and `lsadc_scan_config`
+  (validates the LSADC register-map fix). The default silicon suite is now
+  **17/17**. Plus an opt-in `gadc_register_liveness` (gated `chip-bs21` — GADC is
+  BS2X-only; WS63 uses the LSADC) and an opt-in `rtc_counter_advances` behind a
+  new **`hil-rtc`** feature (the common WS63 EVB does not populate the RTC's
+  32.768 kHz crystal, so touching the RTC stalls the bus / drops the debug link;
+  enable only on a board that has the crystal).
+
 ## [0.4.0] - 2026-06-15
 
 This is the first silicon-validated HAL release: every driver below was brought

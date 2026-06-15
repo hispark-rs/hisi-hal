@@ -125,6 +125,11 @@ embassy = ["dep:critical-section", "dep:embassy-time-driver", "dep:embassy-time-
 # tests in tests/hil.rs — GPIO0↔GPIO3, SPI0 GPIO9↔GPIO11, UART1 GPIO15↔GPIO16.
 # Run with `--features chip-ws63,hil-loopback` on a board wired accordingly.
 hil-loopback = []
+# `hil-rtc`: opt-in HIL test for the RTC counter. OFF by default because the
+# common WS63 EVB does not populate the RTC's 32.768 kHz crystal, so touching the
+# RTC registers stalls the bus / drops the debug link. Enable only on a board that
+# DOES populate the crystal: `--features chip-ws63,hil-rtc`.
+hil-rtc = []
 
 # On-target (semihosting) HIL integration test (RISC-V only; flashed to a real
 # WS63 board by `probe-rs run`). embedded-test IS the harness — the default

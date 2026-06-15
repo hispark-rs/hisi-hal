@@ -485,11 +485,186 @@ mod tests {
         assert!((114..=896).contains(&code), "tsensor code {code} outside the valid 114..=896 range");
     }
 
-    // (No rtc_counter_advances test: this board does NOT populate the RTC's
-    // 32.768 kHz crystal, so the RTC clock domain never comes up and any access to
-    // its registers stalls the bus / drops the debug link — same failure class as
-    // the secure SDMA. This is a board-population gap (missing part), not a
-    // software fix, so the RTC simply cannot be HIL-tested on this hardware.)
+    /// I2C0 SCL divider configuration (i2c.rs / examples/ws63/i2c_scan).
+    /// Construct I2C0 at 100 kHz and assert the programmed `i2c_scl_h`/`i2c_scl_l`
+    /// half-period registers match the HAL's divider (each = (I2C_CLOCK_HZ /
+    /// (2·freq)) / 2, off the **24 MHz TCXO** — not the CPU clock; the vendor
+    /// `clock_init` leaves I2C on the crystal) and that `i2c_en` is set. Register
+    /// CONFIG only — no bus transaction, so no wired peer / pull-ups are needed.
+    /// I2C0 is not individually clock-gated (default-on), so its window is live.
+    #[cfg(feature = "chip-ws63")]
+    #[test]
+    fn i2c0_scl_config() {
+        use hal::i2c::I2c;
+        const FREQ: u32 = 100_000;
+        // SAFETY: sequential single-hart run; I2C0 singleton not otherwise held.
+        let _i2c = I2c::new_i2c0(unsafe { hal::peripherals::I2c0::steal() }, FREQ);
+
+        let pclk = hal::soc::chip::I2C_CLOCK_HZ; // 24 MHz TCXO
+        let expected_half = (pclk / (2 * FREQ)) / 2;
+        // SAFETY: read-only MMIO loads of the I2C0 config registers.
+        let r = unsafe { &*pac::I2c0::PTR };
+        assert_eq!(r.i2c_scl_h().read().bits(), expected_half, "I2C0 scl_h mismatch");
+        assert_eq!(r.i2c_scl_l().read().bits(), expected_half, "I2C0 scl_l mismatch");
+        assert!(r.i2c_ctrl().read().i2c_en().bit_is_set(), "I2C0 i2c_en not set after new_i2c0");
+    }
+
+    /// PWM clock gate + channel-0 config (pwm.rs / clock.rs). PWM is clock-gated
+    /// (CKEN_CTL0 field [10:2], base bit 2 — `pwm_porting.c`); enable the field via
+    /// the `CldoCrg` register (RMW-set, mirrors `clock_gate_uart0_enabled`) so the
+    /// PWM registers latch writes, then configure channel 0 at 10 kHz / 50 % and
+    /// assert the low frequency register latched `SYSTEM_CLOCK_HZ / freq` (24 000,
+    /// chosen to fit the 16-bit `pwm_freq_l0`) and the enable bit toggles. Register
+    /// level — no pin output asserted.
+    #[cfg(feature = "chip-ws63")]
+    #[test]
+    fn pwm_configure_and_enable() {
+        use hal::clock::Peripheral;
+        use hal::pwm::PwmChannel;
+        let (_reg_idx, base_bit) = Peripheral::Pwm.cken_info().expect("PWM should be gated");
+        // SAFETY: RMW-set of clock-enable bits; keeps other clocks running.
+        let crg = unsafe { &*pac::CldoCrg::PTR };
+        crg.cken_ctl0().modify(|r, w| unsafe { w.bits(r.bits() | (0x1FF << base_bit)) });
+
+        // SAFETY: sequential single-hart run; PWM singleton not otherwise held.
+        let pwm = unsafe { hal::peripherals::Pwm::steal() };
+        let mut ch = PwmChannel::new(&pwm, 0);
+        const FREQ: u32 = 10_000; // period = 24_000, fits the 16-bit low register
+        ch.configure(FREQ, 50);
+        ch.enable();
+
+        let expected_period = hal::soc::chip::SYSTEM_CLOCK_HZ / FREQ; // 24_000
+        // SAFETY: read-only MMIO loads of the PWM ch0 registers.
+        let r = unsafe { &*pac::Pwm::PTR };
+        let lo = r.pwm_freq_l0().read().bits() as u32;
+        assert_eq!(lo, expected_period, "PWM ch0 freq_l0 not latched: got {lo} want {expected_period}");
+        assert_ne!(r.pwm_en0().read().bits() & 1, 0, "PWM ch0 not enabled");
+
+        ch.disable();
+        assert_eq!(r.pwm_en0().read().bits() & 1, 0, "PWM ch0 still enabled after disable");
+    }
+
+    /// Watchdog `configure` load-field **saturation** (wdt.rs / examples/ws63/reset_demo).
+    /// Validates the load-field u64-saturation fix on silicon: request a 300 s
+    /// timeout — far beyond the 24-bit `wdt_load[31:8]` field's ~178 s ceiling at
+    /// 24 MHz — and assert the programmed load CLAMPS to `WDT_MAX_LOAD` (0xFFFFFF)
+    /// instead of truncating/wrapping to a bogus small load (the bug the fix
+    /// addresses). Configured with **reset DISABLED** so the WDT can never reboot
+    /// the board. Register CONFIG only — the 256-cycle-resolution counter is not
+    /// polled (counting is validated by the timer test; this isolates the fix).
+    #[cfg(feature = "chip-ws63")]
+    #[test]
+    fn wdt_configure_saturates_load() {
+        use hal::wdt::{ResetPulseLength, Watchdog, WdtMode, WDT_MAX_LOAD};
+        // SAFETY: sequential single-hart run; WDT singleton not otherwise held.
+        let mut wdt = Watchdog::new(unsafe { hal::peripherals::Wdt::steal() });
+        // 300 s ≫ the field's ~178 s max → must clamp in u64 before narrowing.
+        wdt.configure(300_000, WdtMode::SingleInterrupt, false, ResetPulseLength::Cycles2);
+
+        // SAFETY: read-only MMIO load of the WDT load register; field is in [31:8].
+        let r = unsafe { &*pac::Wdt::PTR };
+        let load = r.wdt_load().read().bits() >> 8;
+        assert_eq!(
+            load, WDT_MAX_LOAD,
+            "WDT load did not saturate: got 0x{:06x} want 0x{:06x}", load, WDT_MAX_LOAD
+        );
+        wdt.disable();
+    }
+
+    /// I2S register liveness (i2s.rs). I2S is clock-gated (CKEN_CTL0 bit 12 = clk,
+    /// bit 11 = bus — `sio_porting.c`); enable both, `configure` the block (master,
+    /// I2S, 16-bit) without faulting, and assert the IP `version` register reads a
+    /// sane, non-floating ID (silicon returns 0x13) — proving the I2S window is
+    /// clocked and its register map resolves. Register CONFIG only — a full TX/RX
+    /// data path needs the BCLK/FS dividers + an external codec (or internal
+    /// loopback), out of scope for a self-contained liveness check.
+    #[cfg(feature = "chip-ws63")]
+    #[test]
+    fn i2s_version_live() {
+        use hal::i2s::{I2sConfig, I2sDriver};
+        // Enable the I2S clk (bit 12) + bus (bit 11) gates so the block is live.
+        // SAFETY: RMW-set of clock-enable bits; keeps other clocks running.
+        let crg = unsafe { &*pac::CldoCrg::PTR };
+        crg.cken_ctl0().modify(|r, w| unsafe { w.bits(r.bits() | (1 << 12) | (1 << 11)) });
+
+        // SAFETY: sequential single-hart run; I2S singleton not otherwise held.
+        let mut i2s = I2sDriver::new(unsafe { hal::peripherals::I2s::steal() });
+        i2s.configure(&I2sConfig::default());
+
+        let ver = i2s.version();
+        assert!(
+            ver != 0 && ver != 0xFF,
+            "I2S version register read an unsane value 0x{:02x} (block not clocked?)", ver
+        );
+    }
+
+    /// LSADC scan-config register mapping (lsadc.rs). The LSADC register map had a
+    /// block-wide offset bug fixed in phase 2; this asserts the corrected map on
+    /// silicon. `configure_scan` sets the selected channel bit + the averaging /
+    /// sample-count fields in `lsadc_ctrl_0`; read them back. LSADC is not
+    /// individually clock-gated (default-on). Register CONFIG only — NO analog
+    /// conversion: a full conversion needs the AFE/LDO power-up sequence and an
+    /// unbounded done-poll, which could stall the bus if the analog supply isn't
+    /// provisioned (same risk class as the RTC crystal below).
+    #[cfg(feature = "chip-ws63")]
+    #[test]
+    fn lsadc_scan_config() {
+        use hal::lsadc::{AdcChannel, AdcConfig, LsAdc};
+        // SAFETY: sequential single-hart run; LSADC singleton not otherwise held.
+        let mut adc = LsAdc::new(unsafe { hal::peripherals::Lsadc::steal() });
+        let cfg = AdcConfig::default();
+        adc.configure_scan(AdcChannel::Channel0, &cfg);
+
+        // SAFETY: read-only MMIO load of the LSADC control register.
+        let r = unsafe { &*pac::Lsadc::PTR };
+        let ctrl0 = r.lsadc_ctrl_0().read();
+        assert_ne!(ctrl0.channel().bits() & (1 << 0), 0, "LSADC channel-0 select bit not set");
+        assert_eq!(ctrl0.equ_model_sel().bits(), cfg.averaging as u8, "LSADC averaging field mismatch");
+        assert_eq!(ctrl0.sample_cnt().bits(), cfg.sample_count & 0x1F, "LSADC sample_cnt field mismatch");
+    }
+
+    /// RTC free-running counter advances (rtc.rs) — **opt-in** (`hil-rtc` feature).
+    /// This board does NOT populate the RTC's 32.768 kHz crystal, so its clock
+    /// domain never comes up and touching the RTC registers stalls the bus / drops
+    /// the debug link (same failure class as the unprovisioned secure SDMA) — hence
+    /// it is gated behind `hil-rtc` and is OFF in the default suite. On a board that
+    /// DOES populate the crystal, run `--features chip-ws63,hil-rtc`: configure
+    /// free-running, enable, and assert `current_value` advanced across a long
+    /// busy-wait (the 32 kHz counter is slow, so the CPU wait is large).
+    #[cfg(all(feature = "chip-ws63", feature = "hil-rtc"))]
+    #[test]
+    fn rtc_counter_advances() {
+        use hal::rtc::{RtcDriver, RtcMode};
+        // SAFETY: sequential single-hart run; RTC singleton not otherwise held.
+        let mut rtc = RtcDriver::new(unsafe { hal::peripherals::Rtc::steal() });
+        rtc.configure(RtcMode::FreeRunning, 0);
+        rtc.enable();
+        let a = rtc.current_value();
+        // 32.768 kHz counter: a large CPU busy-loop spans many ms / hundreds of
+        // ticks at 240 MHz, well over the ~30 µs tick period.
+        for _ in 0..3_000_000u32 {
+            black_box(0u32);
+        }
+        let b = rtc.current_value();
+        rtc.disable();
+        assert_ne!(a, b, "RTC counter did not advance: a=0x{:08x} b=0x{:08x}", a, b);
+    }
+
+    /// GADC register liveness (gadc.rs) — **BS2X-only** (`chip-bs21`). The WS63 has
+    /// no GADC (it uses the LSADC, tested above), so the user-requested GADC check
+    /// lives here for a BS21 board: read the done/status register (`rpt_gadc_data_3`)
+    /// and assert it is not the all-ones bus-floating pattern. Reads only — no
+    /// AFE/LDO power-up or conversion (those need the analog supply + an unbounded
+    /// done-poll; out of scope for a bare register-liveness check). Never built for
+    /// the WS63 board.
+    #[cfg(feature = "chip-bs21")]
+    #[test]
+    fn gadc_register_liveness() {
+        // SAFETY: read-only MMIO load of a GADC status register via the PAC.
+        let r = unsafe { &*pac::Gadc::PTR };
+        let status = r.rpt_gadc_data_3().read().bits();
+        assert_ne!(status, 0xFFFF_FFFF, "GADC status read returned the all-ones bus-floating pattern");
+    }
 
     // ── Loopback tests (opt-in `hil-loopback` feature; need board jumpers) ──
 
