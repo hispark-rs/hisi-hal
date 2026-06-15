@@ -125,6 +125,25 @@ impl<'d> TimerDriver<'d> {
             2 => r.timer0_current_value(2).read().bits(),
             _ => unreachable!(),
         };
+        // cnt_req (bit 5) / cnt_lock (bit 6) of TIMER_V150's control register. WS63's
+        // ws63-pac models them as named fields; BS2X's bs2x-pac does not (same V150
+        // IP, the field just isn't in its SVD), so chip-bs21 pokes the raw bits.
+        let set_cnt_req = |n: usize| {
+            #[cfg(feature = "chip-ws63")]
+            ctrl(n).modify(|_, w| w.cnt_req().set_bit());
+            #[cfg(feature = "chip-bs21")]
+            ctrl(n).modify(|r, w| unsafe { w.bits(r.bits() | (1 << 5)) });
+        };
+        let cnt_locked = |n: usize| -> bool {
+            #[cfg(feature = "chip-ws63")]
+            {
+                ctrl(n).read().cnt_lock().bit_is_set()
+            }
+            #[cfg(feature = "chip-bs21")]
+            {
+                (ctrl(n).read().bits() & (1 << 6)) != 0
+            }
+        };
 
         // A disabled timer holds a stale latch; the vendor HAL returns 0.
         if ctrl(n).read().enable().bit_is_clear() {
@@ -132,11 +151,11 @@ impl<'d> TimerDriver<'d> {
         }
         // Request a fresh snapshot of the down-counter into current_value0
         // (modify preserves enable/mode/int_mask)…
-        ctrl(n).modify(|_, w| w.cnt_req().set_bit());
+        set_cnt_req(n);
         // …then wait (bounded) for the hardware to latch it.
         let mut timeout = 0u32;
         while timeout < LOCK_TIMEOUT {
-            if ctrl(n).read().cnt_lock().bit_is_set() {
+            if cnt_locked(n) {
                 return read_value(n);
             }
             timeout += 1;

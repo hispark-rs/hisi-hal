@@ -32,6 +32,39 @@ pub enum I2cError {
     Nack,
 }
 
+// embedded-hal 1.0 portability: wire the BS2X I2C error + driver into the standard
+// traits so generic drivers work against it exactly like the WS63 i2c.rs core.
+impl embedded_hal::i2c::Error for I2cError {
+    fn kind(&self) -> embedded_hal::i2c::ErrorKind {
+        match self {
+            I2cError::Nack => embedded_hal::i2c::ErrorKind::NoAcknowledge(
+                embedded_hal::i2c::NoAcknowledgeSource::Unknown,
+            ),
+            I2cError::Timeout => embedded_hal::i2c::ErrorKind::Other,
+        }
+    }
+}
+
+impl<T> embedded_hal::i2c::ErrorType for I2c<'_, T> {
+    type Error = I2cError;
+}
+
+impl<T> embedded_hal::i2c::I2c for I2c<'_, T> {
+    fn transaction(
+        &mut self,
+        addr: u8,
+        operations: &mut [embedded_hal::i2c::Operation<'_>],
+    ) -> Result<(), I2cError> {
+        for op in operations {
+            match op {
+                embedded_hal::i2c::Operation::Read(buf) => self.read(addr, buf)?,
+                embedded_hal::i2c::Operation::Write(data) => self.write(addr, data)?,
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Bound on status-bit polling so a missing device/stuck bus can't hang the CPU.
 const POLL_LIMIT: u32 = 1_000_000;
 
