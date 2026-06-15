@@ -394,7 +394,7 @@ mod tests {
 
         // Recompute the expected divider exactly as configure_uart() does.
         let pclk = hal::soc::chip::UART_CLOCK_HZ; // 160 MHz
-        let div64 = ((pclk as u64) * 4 / (cfg.baudrate as u64)) as u32; // = div * 64
+        let div64 = ((pclk as u64) * 4 / (cfg.baudrate.baud() as u64)) as u32; // = div * 64
         let div = div64 >> 6;
         let exp_div_fra = (div64 & 0x3F) as u16;
         let exp_div_l = (div & 0xFF) as u16;

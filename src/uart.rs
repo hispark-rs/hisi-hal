@@ -32,9 +32,45 @@ pub enum StopBits {
     Two,
 }
 
+/// A validated UART baud rate. The 16-bit integer divider is
+/// `div = UART_CLOCK_HZ / (16 · baud)`, so against the default 160 MHz PLL base the
+/// realisable baud is `[~153, 10 000 000]`. `try_new` rejects anything outside that
+/// instead of the old silent low-clamp (`baud < min_baud → min_baud`). Note: a
+/// `Config.clock_hz` override (the 24/40 MHz flashboot console clock) shifts the
+/// realisable range down — `BaudRate` validates against the default base, so pairing
+/// a very high baud with a low override clock is the caller's responsibility (the
+/// documented `clock_hz` footgun).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct BaudRate(u32);
+
+impl BaudRate {
+    /// 115 200 baud (the default).
+    pub const BAUD_115200: BaudRate = BaudRate(115_200);
+
+    /// Construct from a baud rate. `None` if the 16-bit divider against the default
+    /// 160 MHz base would fall outside `[1, 0xFFFF]` (baud too high or too low).
+    pub const fn try_new(baud: u32) -> Option<Self> {
+        if baud == 0 {
+            return None;
+        }
+        // div = (UART_CLOCK_HZ * 4 / baud) >> 6  (the fixed-point form configure uses).
+        let div = ((crate::soc::chip::UART_CLOCK_HZ as u64) * 4 / (baud as u64)) >> 6;
+        if div < 1 || div > 0xFFFF {
+            return None;
+        }
+        Some(BaudRate(baud))
+    }
+
+    /// The baud rate in Hz.
+    pub const fn baud(self) -> u32 {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
-    pub baudrate: u32,
+    pub baudrate: BaudRate,
     pub data_bits: DataBits,
     pub parity: Parity,
     pub stop_bits: StopBits,
@@ -52,7 +88,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            baudrate: 115200,
+            baudrate: BaudRate::BAUD_115200,
             data_bits: DataBits::Eight,
             parity: Parity::None,
             stop_bits: StopBits::One,
@@ -114,13 +150,13 @@ fn configure_uart(idx: u8, config: &Config) {
     r.uart_ctl().write(|w| w.div_en().set_bit());
 
     // Set baud rate: div = UART_CLK / (16 * baudrate)
-    // Valid range: div ∈ [1, 65535] (16-bit divider).
-    // At 160MHz UART clock, valid baud ∈ [153, 10_000_000].
+    // Valid range: div ∈ [1, 65535] (16-bit divider). `BaudRate::try_new` already
+    // rejected any baud whose divider would fall outside that against the 160 MHz
+    // PLL base, so no runtime clamp is needed (and `baud()` is never 0 → no div0).
     // `config.clock_hz` overrides the base for pre-`clock_init` examples (the
     // 24/40 MHz flashboot console clock); `None` keeps the 160 MHz PLL default.
     let pclk = config.clock_hz.unwrap_or(crate::soc::chip::UART_CLOCK_HZ);
-    let min_baud = (pclk / (16 * 65535)) + 1;
-    let baudrate = if config.baudrate < min_baud { min_baud } else { config.baudrate };
+    let baudrate = config.baudrate.baud();
     // div = pclk / (16 * baud), as fixed-point with 6 fractional bits (div_fra ∈
     // [0,63] sixty-fourths). Dropping the fraction (old div_fra=0) is fine at high
     // clocks but a significant baud error at the TCXO base — flashboot itself
@@ -428,20 +464,17 @@ mod tests {
     use super::*;
     use crate::soc::chip::UART_CLOCK_HZ;
 
-    // Re-derivation of the pure baud-rate math that `configure_uart` inlines
-    // (lines 100-114). div = pclk / (16 * baud) carried as 6-bit fixed point:
+    // Re-derivation of the pure baud-rate math that `configure_uart` inlines.
+    // div = pclk / (16 * baud) carried as 6-bit fixed point:
     //   div64 = pclk * 4 / baud  (= div * 64), div = div64 >> 6, frac = div64 & 0x3F.
-    // The 16-bit divider gives a minimum representable baud of pclk/(16*65535)+1.
+    // The 16-bit divider gives a minimum representable baud of pclk/(16*65535)+1 —
+    // `BaudRate::try_new` rejects anything below it instead of the old silent clamp.
     fn min_baud() -> u32 {
         (UART_CLOCK_HZ / (16 * 65535)) + 1
     }
-    fn clamp_baud(baud: u32) -> u32 {
-        let m = min_baud();
-        if baud < m { m } else { baud }
-    }
-    /// Returns (div_l, div_h, div_fra) exactly as `configure_uart` would program them.
+    /// Returns (div_l, div_h, div_fra) exactly as `configure_uart` would program them
+    /// for a valid (already-validated) baud — no clamp, mirroring the tightened path.
     fn baud_regs(baud: u32) -> (u16, u16, u16) {
-        let baud = clamp_baud(baud);
         let div64 = ((UART_CLOCK_HZ as u64) * 4 / (baud as u64)) as u32;
         let div = div64 >> 6;
         let div_fra = (div64 & 0x3F) as u16;
@@ -454,10 +487,30 @@ mod tests {
     #[test]
     fn default_config_is_115200_8n1() {
         let c = Config::default();
-        assert_eq!(c.baudrate, 115200);
+        assert_eq!(c.baudrate, BaudRate::BAUD_115200);
+        assert_eq!(c.baudrate.baud(), 115200);
         assert_eq!(c.data_bits, DataBits::Eight);
         assert_eq!(c.parity, Parity::None);
         assert_eq!(c.stop_bits, StopBits::One);
+    }
+
+    /// `BaudRate::try_new` rejects bauds whose 16-bit divider would over/underflow
+    /// against the 160 MHz PLL base — the boundary that the old silent clamp hid.
+    #[test]
+    fn baud_rate_rejects_out_of_range() {
+        // Too low: a sub-`min_baud` rate demands div > 0xFFFF → None.
+        assert!(BaudRate::try_new(0).is_none());
+        assert!(BaudRate::try_new(min_baud() - 1).is_none());
+        // Zero baud is always rejected (no div-by-zero downstream).
+        assert!(BaudRate::try_new(min_baud()).is_some());
+        // Too high: div underflows below 1 (baud > pclk/16) → None.
+        assert!(BaudRate::try_new(UART_CLOCK_HZ).is_none());
+        assert!(BaudRate::try_new(UART_CLOCK_HZ / 16 + 1).is_none());
+        // Common rates all construct.
+        for &b in &[300u32, 9600, 115200, 921600, 1_000_000] {
+            assert!(BaudRate::try_new(b).is_some(), "baud {b} should be valid");
+            assert_eq!(BaudRate::try_new(b).unwrap().baud(), b);
+        }
     }
 
     /// 115200 baud at 160 MHz: div = 160e6/(16*115200) ≈ 86.8 → div=86, frac≈51.
@@ -493,24 +546,14 @@ mod tests {
         }
     }
 
-    /// Sub-minimum baud rates clamp up to min_baud so the 16-bit divider never
-    /// overflows; min_baud itself programs a divider near (but ≤) the 0xFFFF cap.
+    /// At the minimum valid baud the full divider (div64 >> 6) fits the 16-bit
+    /// DIV_H:DIV_L pair — the boundary `BaudRate::try_new` enforces at construction.
     #[test]
-    fn low_baud_clamps_to_min() {
-        // A baud of 1 would demand div ≫ 65535; clamping prevents the overflow.
-        assert_eq!(clamp_baud(1), min_baud());
-        assert_eq!(clamp_baud(0), min_baud());
-        // At min_baud the full divider (div64 >> 6) fits the 16-bit DIV_H:DIV_L.
+    fn min_baud_divider_fits_sixteen_bits() {
+        assert!(BaudRate::try_new(min_baud()).is_some());
         let div64 = ((UART_CLOCK_HZ as u64) * 4 / (min_baud() as u64)) as u32;
         let div = div64 >> 6;
         assert!(div <= 0xFFFF, "div {div} overflows 16-bit divider at min_baud");
-    }
-
-    /// A baud above min_baud is never altered by the clamp.
-    #[test]
-    fn normal_baud_not_clamped() {
-        assert_eq!(clamp_baud(115200), 115200);
-        assert_eq!(clamp_baud(min_baud() + 1), min_baud() + 1);
     }
 
     /// Higher baud rates yield a smaller (or equal) integer divisor — the divider
@@ -599,7 +642,7 @@ mod tests {
     #[test]
     fn ctl_7e2_known_value() {
         let c = Config {
-            baudrate: 9600,
+            baudrate: BaudRate::try_new(9600).unwrap(),
             data_bits: DataBits::Seven,
             parity: Parity::Even,
             stop_bits: StopBits::Two,
@@ -615,16 +658,13 @@ mod tests {
 
 #[cfg(all(test, not(target_arch = "riscv32")))]
 mod proptests {
+    use super::BaudRate;
     use crate::soc::chip::UART_CLOCK_HZ;
     use proptest::prelude::*;
 
-    fn min_baud() -> u32 {
-        (UART_CLOCK_HZ / (16 * 65535)) + 1
-    }
-
+    /// The register triple `configure_uart` programs for a (valid) baud — no clamp,
+    /// mirroring the tightened path where `BaudRate` already guaranteed the range.
     fn baud_regs(baud: u32) -> (u16, u16, u16) {
-        let m = min_baud();
-        let baud = if baud < m { m } else { baud };
         let div64 = ((UART_CLOCK_HZ as u64) * 4 / (baud as u64)) as u32;
         let div = div64 >> 6;
         let div_fra = (div64 & 0x3F) as u16;
@@ -634,29 +674,27 @@ mod proptests {
     }
 
     proptest! {
-        /// Fuzz: baud divider math never panics for any u32 baud (incl. 0).
+        /// Fuzz: `BaudRate::try_new` never panics for any u32 baud (incl. 0) — it
+        /// returns `None` out of range instead of clamping or dividing by zero.
         #[test]
-        fn baud_regs_never_panics(baud in any::<u32>()) {
-            let _ = baud_regs(baud);
+        fn try_new_never_panics(baud in any::<u32>()) {
+            let _ = BaudRate::try_new(baud);
         }
 
-        /// Fuzz: the fractional field is always a valid 6-bit value, and each
-        /// divider byte fits 8 bits, for every clamped baud.
+        /// Fuzz: every baud that `BaudRate` accepts programs an in-range register
+        /// triple — 6-bit fraction, 8-bit DIV_L/DIV_H, 16-bit assembled divider.
+        /// (Invalid bauds are rejected at construction, so this is the only path
+        /// that ever reaches `configure_uart`.)
         #[test]
-        fn fields_stay_in_range(baud in any::<u32>()) {
-            let (div_l, div_h, frac) = baud_regs(baud);
-            prop_assert!(frac <= 0x3F);
-            prop_assert!(div_l <= 0xFF);
-            prop_assert!(div_h <= 0xFF);
-        }
-
-        /// Fuzz: for any baud at or above min_baud, the assembled 16-bit divider
-        /// never overflows DIV_H:DIV_L (the clamp guarantees this).
-        #[test]
-        fn divider_fits_sixteen_bits(baud in min_baud()..=u32::MAX) {
-            let div64 = ((UART_CLOCK_HZ as u64) * 4 / (baud as u64)) as u32;
-            let div = div64 >> 6;
-            prop_assert!(div <= 0xFFFF, "baud={} div={}", baud, div);
+        fn accepted_baud_fits_registers(baud in any::<u32>()) {
+            if let Some(br) = BaudRate::try_new(baud) {
+                let (div_l, div_h, frac) = baud_regs(br.baud());
+                prop_assert!(frac <= 0x3F);
+                prop_assert!(div_l <= 0xFF);
+                prop_assert!(div_h <= 0xFF);
+                let div = ((div_h as u32) << 8) | (div_l as u32);
+                prop_assert!(div <= 0xFFFF, "baud={} div={}", baud, div);
+            }
         }
     }
 }
