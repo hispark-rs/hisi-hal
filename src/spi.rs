@@ -15,16 +15,80 @@ pub enum SpiMode {
     Mode3,
 }
 
+/// A validated SPI bus clock. The DesignWare SSI divides `SPI_CLOCK_HZ` (160 MHz)
+/// by an even SCKDV in `[2, 0xFFFE]`, so the achievable SCK is
+/// `[SPI_CLOCK_HZ/0xFFFE ≈ 2.4 kHz, SPI_CLOCK_HZ/2 = 80 MHz]`. `try_from_hz` rejects
+/// anything outside that band instead of silently clamping the divider (the old
+/// `frequency: u32` path clamped to 2× / ½× the requested SCK without telling you).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct SpiHz(u32);
+
+impl SpiHz {
+    /// 1 MHz — the default SPI bus clock.
+    pub const ONE_MHZ: SpiHz = SpiHz(1_000_000);
+
+    /// Construct from a target SCK frequency. `None` if the resulting SCKDV
+    /// divider would fall outside `[2, 0xFFFE]` (frequency too high or too low).
+    pub const fn try_from_hz(hz: u32) -> Option<Self> {
+        if hz == 0 {
+            return None;
+        }
+        let div = crate::soc::chip::SPI_CLOCK_HZ / hz;
+        if div < 2 || div > 0xFFFE {
+            return None;
+        }
+        Some(SpiHz(hz))
+    }
+
+    /// The requested SCK frequency in Hz.
+    pub const fn hz(self) -> u32 {
+        self.0
+    }
+
+    /// The even SCKDV divider for this frequency (always in `[2, 0xFFFE]`).
+    const fn to_sckdv(self) -> u32 {
+        sckdv(crate::soc::chip::SPI_CLOCK_HZ, self.0)
+    }
+}
+
+/// SPI data frame size in bits, validated to the SSI DFS range `4..=16`.
+///
+/// (The 4-bit DFS field caps the documented range at 16; whether this silicon also
+/// supports the 32-bit DFS extension is an on-board open question — `4..=16` is the
+/// conservative, always-runnable choice. A value outside it is unrepresentable
+/// rather than silently masked into the register.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct DataBits(u8);
+
+impl DataBits {
+    /// 8-bit frames (the common default).
+    pub const EIGHT: DataBits = DataBits(8);
+    /// 16-bit frames.
+    pub const SIXTEEN: DataBits = DataBits(16);
+
+    /// Construct from a frame size. `None` outside `4..=16`.
+    pub const fn new(bits: u8) -> Option<Self> {
+        if bits >= 4 && bits <= 16 { Some(DataBits(bits)) } else { None }
+    }
+
+    /// The frame size in bits (always `4..=16`).
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
-    pub frequency: u32,
+    pub frequency: SpiHz,
     pub mode: SpiMode,
-    pub data_bits: u8,
+    pub data_bits: DataBits,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { frequency: 1_000_000, mode: SpiMode::Mode0, data_bits: 8 }
+        Self { frequency: SpiHz::ONE_MHZ, mode: SpiMode::Mode0, data_bits: DataBits::EIGHT }
     }
 }
 
@@ -49,9 +113,13 @@ fn spi_regs(idx: u8) -> &'static crate::soc::pac::spi0::RegisterBlock {
 /// clamped to `SPI_MINUMUM_CLK_DIV` = 2). SCKDV bit 0 is read-only 0, so the
 /// value must be even. There is NO `/2` and NO `-1` (an earlier version of this
 /// driver had both, producing ~2x the requested SCK).
-fn sckdv(pclk: u32, freq: u32) -> u32 {
+const fn sckdv(pclk: u32, freq: u32) -> u32 {
     let freq = if freq == 0 { 1 } else { freq };
-    let div = (pclk / freq).clamp(2, 0xFFFF);
+    let div = match pclk / freq {
+        d if d < 2 => 2,
+        d if d > 0xFFFF => 0xFFFF,
+        d => d,
+    };
     div & !1 // SCKDV LSB is read-only 0 (must be even)
 }
 
@@ -143,8 +211,7 @@ fn configure_spi(idx: u8, config: &Config) {
     configure_spi_source_clock();
     let r = spi_regs(idx);
     r.spi_er().write(|w| unsafe { w.bits(0) });
-    let pclk = crate::soc::chip::SPI_CLOCK_HZ;
-    r.spi_brs().write(|w| unsafe { w.bits(sckdv(pclk, config.frequency)) });
+    r.spi_brs().write(|w| unsafe { w.bits(config.frequency.to_sckdv()) });
 
     let mut ctra = 0u32;
     match config.mode {
@@ -153,7 +220,7 @@ fn configure_spi(idx: u8, config: &Config) {
         SpiMode::Mode2 => ctra |= 1 << 4,
         SpiMode::Mode3 => ctra |= (1 << 3) | (1 << 4),
     }
-    ctra |= ((config.data_bits.saturating_sub(1)) as u32) << 13;
+    ctra |= ((config.data_bits.bits() - 1) as u32) << 13;
     // CTRA.trsm (bits 18:19): 0b00 = transmit-and-receive (full duplex).
     // (0b11 is EEPROM-read, NOT TX+RX — leaving trsm = 0 is correct.)
     r.spi_ctra().write(|w| unsafe { w.bits(ctra) });
@@ -305,6 +372,33 @@ mod tests {
     #[test]
     fn test_sckdv_clamps_at_max() {
         assert_eq!(sckdv(SPI_CLOCK_HZ, 1000), 0xFFFE);
+    }
+
+    #[test]
+    fn spi_hz_rejects_out_of_range() {
+        use super::SpiHz;
+        // 0 and frequencies whose divider leaves [2, 0xFFFE] are rejected.
+        assert!(SpiHz::try_from_hz(0).is_none());
+        // Too high: > SPI_CLOCK_HZ/2 (=80 MHz) → div < 2.
+        assert!(SpiHz::try_from_hz(SPI_CLOCK_HZ / 2 + 1).is_none());
+        assert!(SpiHz::try_from_hz(SPI_CLOCK_HZ).is_none());
+        // Too low: div > 0xFFFE (1 Hz → 160 000 000 div).
+        assert!(SpiHz::try_from_hz(1).is_none());
+        // In range: 1 MHz → div 160; the default const agrees.
+        assert_eq!(SpiHz::try_from_hz(1_000_000).unwrap().hz(), 1_000_000);
+        assert_eq!(SpiHz::ONE_MHZ.to_sckdv(), 160);
+        // Exactly the edges resolve to the min/max even divider.
+        assert_eq!(SpiHz::try_from_hz(SPI_CLOCK_HZ / 2).unwrap().to_sckdv(), 2);
+    }
+
+    #[test]
+    fn data_bits_validates_4_to_16() {
+        use super::DataBits;
+        assert!(DataBits::new(3).is_none());
+        assert!(DataBits::new(17).is_none());
+        assert_eq!(DataBits::new(4).unwrap().bits(), 4);
+        assert_eq!(DataBits::new(16).unwrap().bits(), 16);
+        assert_eq!(DataBits::EIGHT.bits(), 8);
     }
 }
 
