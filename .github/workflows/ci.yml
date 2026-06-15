@@ -63,3 +63,21 @@ jobs:
       - run: cargo doc --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # Catch accidental SemVer-incompatible API changes: compares this crate's public
+  # API against the last release on crates.io and fails if the change level (patch
+  # / minor / major) is not reflected in the version bump. A breaking change with
+  # no bump turns the PR red — exactly when an API tightening (e.g. a `configure`
+  # signature change) needs a 0.x-minor bump. Runs on the host (the lib compiles
+  # for x86_64 — same as the unit tests); the action installs cargo-semver-checks
+  # and the nightly rustdoc it needs. chip-ws63/chip-bs21 are mutually exclusive,
+  # so we check the default-features group (chip-ws63) rather than --all-features.
+  semver:
+    name: SemVer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo-semver-checks (vs last crates.io release)
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          feature-group: default-features
