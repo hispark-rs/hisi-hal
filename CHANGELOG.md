@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-15
+
+This is the first silicon-validated HAL release: every driver below was brought
+up and verified on real WS63 hardware (12 HIL driver tests + a jumper loopback
+group, all passing). It requires `ws63-pac` 0.2 for the SPI/TIMER register fixes,
+so it is a minor (0.x-breaking) bump.
+
 ### Fixed
 
 - **timer**: `current_value()` now performs the TIMER_V150 `cnt_req`/`cnt_lock`
@@ -59,6 +66,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **deps**: bump the `ws63-pac` dependency requirement to `0.2` (was `0.1`). The
+  SPI_WSR and TIMER register-layout fixes the silicon bring-up relies on ship in
+  ws63-pac 0.2.0; pairing this HAL with the older 0.1.x PAC would reintroduce the
+  SPI-timeout / frozen-timer bugs.
 - **dma**: `enable_controller()` bypasses the controller's auto clock-gate when it
   has one (the WS63 M_DMA `DMA_CLK_AUTO_CTRL_REG` bit, via the new
   `DmaInstance::CLK_AUTO_CTRL`), so the clock stays on across a transfer. Mirrors

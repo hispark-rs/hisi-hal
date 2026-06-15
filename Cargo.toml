@@ -1,6 +1,6 @@
 [package]
 name = "hisi-riscv-hal"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2024"
 description = "Hardware Abstraction Layer for HiSilicon WS63 (RISC-V RV32IMFC_Zicsr)"
 license = "MIT"
@@ -11,7 +11,7 @@ categories = ["embedded", "no-std", "hardware-support"]
 [dependencies]
 # Exactly one PAC is linked, selected by the chip feature below. Optional so the
 # inactive one is never compiled.
-ws63-pac = { version = "0.1", default-features = false, features = ["critical-section"], optional = true }
+ws63-pac = { version = "0.2", default-features = false, features = ["critical-section"], optional = true }
 bs2x-pac = { version = "0.1", default-features = false, features = ["critical-section"], optional = true }
 embedded-hal = "1.0.0"
 embedded-hal-nb = "1.0"
