@@ -539,30 +539,35 @@ mod tests {
         assert_eq!(r.pwm_en0().read().bits() & 1, 0, "PWM ch0 still enabled after disable");
     }
 
-    /// Watchdog `configure` load-field **saturation** (wdt.rs / examples/ws63/reset_demo).
-    /// Validates the load-field u64-saturation fix on silicon: request a 300 s
-    /// timeout — far beyond the 24-bit `wdt_load[31:8]` field's ~178 s ceiling at
-    /// 24 MHz — and assert the programmed load CLAMPS to `WDT_MAX_LOAD` (0xFFFFFF)
-    /// instead of truncating/wrapping to a bogus small load (the bug the fix
-    /// addresses). Configured with **reset DISABLED** so the WDT can never reboot
-    /// the board. Register CONFIG only — the 256-cycle-resolution counter is not
-    /// polled (counting is validated by the timer test; this isolates the fix).
+    /// Watchdog timeout **validation + load programming** (wdt.rs).
+    /// The old silent u64-saturation is gone: an out-of-range timeout (300 s, far
+    /// beyond the 24-bit `wdt_load[31:8]` field's ~178 s ceiling at 24 MHz) is now
+    /// REJECTED at `WdtTimeout::from_ms` (returns `None`), while a valid in-range
+    /// timeout programs the exact computed load field on silicon. Configured with
+    /// **reset DISABLED** so the WDT can never reboot the board.
     #[cfg(feature = "chip-ws63")]
     #[test]
     fn wdt_configure_saturates_load() {
-        use hal::wdt::{ResetPulseLength, Watchdog, WdtMode, WDT_MAX_LOAD};
+        use hal::wdt::{ResetPulseLength, Watchdog, WdtMode, WdtTimeout, WDT_MAX_LOAD};
+        // 300 s ≫ the field's ~178 s max → rejected at construction, no clamp.
+        assert!(WdtTimeout::from_ms(300_000).is_none(), "over-range timeout must be rejected");
+        assert!(WdtTimeout::from_ms(WdtTimeout::MAX_MS).is_some());
+        assert!(WdtTimeout::from_ms(WdtTimeout::MAX_MS + 1).is_none());
+
+        // A valid 1 s timeout programs the exact load field on silicon.
+        let timeout = WdtTimeout::from_ms(1_000).unwrap();
         // SAFETY: sequential single-hart run; WDT singleton not otherwise held.
         let mut wdt = Watchdog::new(unsafe { hal::peripherals::Wdt::steal() });
-        // 300 s ≫ the field's ~178 s max → must clamp in u64 before narrowing.
-        wdt.configure(300_000, WdtMode::SingleInterrupt, false, ResetPulseLength::Cycles2);
+        wdt.configure(timeout, WdtMode::SingleInterrupt, false, ResetPulseLength::Cycles2)
+            .expect("configure should succeed on live silicon");
 
+        // Expected field = (1000 ms · 24 MHz / 1000) >> 8 = 24_000_000 >> 8 = 93_750.
+        let expected = (timeout.as_ms() as u64 * hal::wdt::WDT_CLOCK_HZ as u64 / 1000 >> 8) as u32;
+        assert!(expected <= WDT_MAX_LOAD);
         // SAFETY: read-only MMIO load of the WDT load register; field is in [31:8].
         let r = unsafe { &*pac::Wdt::PTR };
         let load = r.wdt_load().read().bits() >> 8;
-        assert_eq!(
-            load, WDT_MAX_LOAD,
-            "WDT load did not saturate: got 0x{:06x} want 0x{:06x}", load, WDT_MAX_LOAD
-        );
+        assert_eq!(load, expected, "WDT load mismatch: got 0x{:06x} want 0x{:06x}", load, expected);
         wdt.disable();
     }
 

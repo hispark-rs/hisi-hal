@@ -55,6 +55,67 @@ pub enum WdtMode {
     DoubleInterrupt,
 }
 
+/// Watchdog configuration / operation error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub enum WdtError {
+    /// The counter-value latch did not become valid within the bounded poll
+    /// (the WDT block is unclocked or wedged).
+    Busy,
+}
+
+/// A validated watchdog timeout in milliseconds.
+///
+/// The constructor [`WdtTimeout::from_ms`] returns `None` for any value that would
+/// fall outside the representable range — instead of the old silent saturation
+/// (`timeout > ~178 s → WDT_MAX_LOAD`). A `WdtTimeout` in hand always programs a
+/// `WDT_LOAD` field in `[1, WDT_MAX_LOAD]`, so [`Watchdog::configure`] can never
+/// clamp or truncate it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct WdtTimeout(u32);
+
+impl WdtTimeout {
+    /// The largest timeout (ms) whose 24-bit `WDT_LOAD` field does not overflow:
+    /// `(WDT_MAX_LOAD << RESEV) / WDT_CLOCK_HZ · 1000`, ≈ 178 000 ms at 24 MHz.
+    pub const MAX_MS: u32 = {
+        let max_cycles = (WDT_MAX_LOAD as u64) << WDT_LOAD_RESEV;
+        (max_cycles * 1000 / (WDT_CLOCK_HZ as u64)) as u32
+    };
+
+    /// Construct from milliseconds. `None` if `ms == 0` (no useful watchdog) or if
+    /// the resulting `WDT_LOAD` field would exceed [`WDT_MAX_LOAD`] (i.e.
+    /// `ms > MAX_MS`, the old silent-saturation boundary).
+    pub const fn from_ms(ms: u32) -> Option<Self> {
+        if ms == 0 {
+            return None;
+        }
+        let cycles = (ms as u64) * (WDT_CLOCK_HZ as u64) / 1000;
+        if (cycles >> WDT_LOAD_RESEV) > WDT_MAX_LOAD as u64 {
+            return None;
+        }
+        Some(WdtTimeout(ms))
+    }
+
+    /// The timeout in milliseconds.
+    pub const fn as_ms(self) -> u32 {
+        self.0
+    }
+
+    /// The 24-bit `WDT_LOAD` field value (`cycles >> RESEV`), guaranteed
+    /// `<= WDT_MAX_LOAD` by construction.
+    const fn load_field(self) -> u32 {
+        let cycles = (self.0 as u64) * (WDT_CLOCK_HZ as u64) / 1000;
+        (cycles >> WDT_LOAD_RESEV) as u32
+    }
+}
+
+/// Bounded spin limit for the `WDT_CCVR` counter-value latch (`request_counter`).
+/// The latch normally validates in a handful of cycles; this is a generous cap so a
+/// wedged/unclocked block returns [`WdtError::Busy`] instead of hanging forever.
+const WDT_CCVR_POLL_LIMIT: u32 = 100_000;
+
 /// Watchdog Timer driver.
 pub struct Watchdog<'d> {
     _wdt: Wdt<'d>,
@@ -100,23 +161,30 @@ impl<'d> Watchdog<'d> {
 
     /// Configure and enable the watchdog.
     ///
+    /// The timeout is a validated [`WdtTimeout`] (built via [`WdtTimeout::from_ms`]),
+    /// so an out-of-range period is rejected at construction rather than silently
+    /// saturated here.
+    ///
     /// # Arguments
     ///
-    /// * `timeout_ms` - Timeout period in milliseconds.
+    /// * `timeout` - Validated timeout period (see [`WdtTimeout`]).
     /// * `mode` - Interrupt mode (single or double interrupt before reset).
     /// * `reset_enable` - Whether to enable system reset on timeout.
     /// * `reset_pulse` - Reset pulse length if reset is enabled.
-    pub fn configure(&mut self, timeout_ms: u32, mode: WdtMode, reset_enable: bool, reset_pulse: ResetPulseLength) {
-        // Timeout(ms) → total WDT clock cycles, then shift out the reserved low
-        // 8 bits to form the 24-bit WDT_LOAD field. Matches the vendor
-        // hal_watchdog_v151_set_attr: `cycles = timeout_s * clock; field = cycles >> LOAD_RESEV`.
-        let cycles = (timeout_ms as u64 * WDT_CLOCK_HZ as u64) / 1000;
-        // Saturate in u64 BEFORE narrowing: a multi-hour timeout shifts to a
-        // value > u32::MAX, and casting to u32 first would TRUNCATE (wrap) it to
-        // a bogus small load instead of clamping. Clamp in u64, then the
-        // already-bounded result narrows losslessly. (The 24-bit field caps the
-        // real timeout at ~178 s anyway, so anything larger must pin to the max.)
-        let load = (cycles >> WDT_LOAD_RESEV).min(WDT_MAX_LOAD as u64) as u32;
+    ///
+    /// # Errors
+    ///
+    /// [`WdtError::Busy`] if the counter-value latch does not validate within the
+    /// bounded poll (an unclocked/wedged WDT block).
+    pub fn configure(
+        &mut self,
+        timeout: WdtTimeout,
+        mode: WdtMode,
+        reset_enable: bool,
+        reset_pulse: ResetPulseLength,
+    ) -> Result<(), WdtError> {
+        // The 24-bit WDT_LOAD field, guaranteed <= WDT_MAX_LOAD by `WdtTimeout`.
+        let load = timeout.load_field();
 
         self.unlock();
 
@@ -141,10 +209,11 @@ impl<'d> Watchdog<'d> {
             self.regs().wdt_cr().write(|w| w.bits(cr));
         }
 
-        // Request counter value update
-        self.request_counter();
+        // Request counter value update (bounded; propagates Busy on a wedged block).
+        let res = self.request_counter();
 
         self.lock();
+        res
     }
 
     /// Enable the watchdog.
@@ -184,17 +253,31 @@ impl<'d> Watchdog<'d> {
     }
 
     /// Read the current counter value.
-    pub fn counter_value(&self) -> u32 {
-        self.request_counter();
-        self.regs().wdt_cnt().read().bits()
+    ///
+    /// # Errors
+    ///
+    /// [`WdtError::Busy`] if the counter-value latch does not validate within the
+    /// bounded poll.
+    pub fn counter_value(&self) -> Result<u32, WdtError> {
+        self.request_counter()?;
+        Ok(self.regs().wdt_cnt().read().bits())
     }
 
-    /// Request a counter value update.
-    fn request_counter(&self) {
+    /// Request a counter-value latch and wait (bounded) for it to validate.
+    ///
+    /// Returns [`WdtError::Busy`] after [`WDT_CCVR_POLL_LIMIT`] spins instead of
+    /// hanging forever on an unclocked/wedged block.
+    fn request_counter(&self) -> Result<(), WdtError> {
         unsafe {
             self.regs().wdt_ccvr_en().write(|w| w.bits(0x01));
         }
-        while self.regs().wdt_ccvr_en().read().bits() & 0x02 == 0 {}
+        for _ in 0..WDT_CCVR_POLL_LIMIT {
+            if self.regs().wdt_ccvr_en().read().bits() & 0x02 != 0 {
+                return Ok(());
+            }
+            core::hint::spin_loop();
+        }
+        Err(WdtError::Busy)
     }
 
     /// Check if a watchdog interrupt is pending (raw, unmasked).
@@ -242,16 +325,13 @@ impl<'d> Watchdog<'d> {
 
 #[cfg(all(test, not(target_arch = "riscv32")))]
 mod tests {
-    use super::{ResetPulseLength, WDT_CLOCK_HZ, WDT_LOAD_RESEV, WDT_MAX_LOAD, WdtMode};
+    use super::{ResetPulseLength, WDT_CLOCK_HZ, WDT_LOAD_RESEV, WDT_MAX_LOAD, WdtMode, WdtTimeout};
 
-    /// Re-derivation of the `configure()` timeout→field math: timeout(ms) is
-    /// converted to total WDT clock cycles, shifted right by the reserved low
-    /// bits to form the 24-bit field, then clamped to the max field value.
-    /// This mirrors `Watchdog::configure` exactly (same types/rounding/clamp)
-    /// without touching any MMIO register.
+    /// The `WDT_LOAD` field a *valid* `WdtTimeout` programs — `from_ms(ms)` then the
+    /// private `load_field()`. Panics on an out-of-range `ms` (the test's contract:
+    /// only valid timeouts reach the field math now; over-range is rejected up front).
     fn load_field(timeout_ms: u32) -> u32 {
-        let cycles = (timeout_ms as u64 * WDT_CLOCK_HZ as u64) / 1000;
-        (cycles >> WDT_LOAD_RESEV).min(WDT_MAX_LOAD as u64) as u32
+        WdtTimeout::from_ms(timeout_ms).expect("ms in range").load_field()
     }
 
     /// Re-derivation of the control-register encoding from `configure()`.
@@ -283,9 +363,9 @@ mod tests {
     }
 
     #[test]
-    fn zero_timeout_yields_zero_load() {
-        // A 0 ms timeout produces a 0-cycle, 0-field load (no underflow/panic).
-        assert_eq!(load_field(0), 0);
+    fn zero_timeout_rejected() {
+        // A 0 ms timeout is not a useful watchdog → rejected at construction.
+        assert!(WdtTimeout::from_ms(0).is_none());
     }
 
     #[test]
@@ -298,14 +378,20 @@ mod tests {
     }
 
     #[test]
-    fn large_timeout_clamps_to_max_field() {
-        // u32::MAX ms vastly exceeds the 24-bit field; the load saturates, never wraps.
-        assert_eq!(load_field(u32::MAX), WDT_MAX_LOAD);
+    fn over_range_timeout_rejected() {
+        // u32::MAX ms vastly exceeds the 24-bit field → rejected (was silently
+        // saturated to WDT_MAX_LOAD before the tightening).
+        assert!(WdtTimeout::from_ms(u32::MAX).is_none());
+        // The boundary is exact: MAX_MS constructs, MAX_MS+1 does not.
+        assert!(WdtTimeout::from_ms(WdtTimeout::MAX_MS).is_some());
+        assert!(WdtTimeout::from_ms(WdtTimeout::MAX_MS + 1).is_none());
+        // The largest accepted timeout still fits the 24-bit field.
+        assert!(WdtTimeout::from_ms(WdtTimeout::MAX_MS).unwrap().load_field() <= WDT_MAX_LOAD);
     }
 
     #[test]
-    fn load_field_is_monotonic_until_clamp() {
-        // More milliseconds never produce a smaller field (within the unclamped range).
+    fn load_field_is_monotonic_in_range() {
+        // More milliseconds never produce a smaller field (within the valid range).
         let a = load_field(1000);
         let b = load_field(2000);
         assert!(b >= a);
@@ -313,16 +399,14 @@ mod tests {
     }
 
     #[test]
-    fn first_timeout_that_reaches_clamp() {
-        // A timeout past the (WDT_MAX_LOAD+1)<<RESEV cycle boundary clamps to max.
-        // Compute that boundary in ms with CEILING division (+1 ms margin) so the
-        // input definitely clears the threshold — a floored value lands one tick
-        // below it (cycles>>RESEV == WDT_MAX_LOAD-ε) and would not yet clamp.
+    fn first_timeout_past_boundary_is_rejected() {
+        // A timeout past the (WDT_MAX_LOAD+1)<<RESEV cycle boundary no longer
+        // clamps — it is rejected. Compute that boundary in ms with CEILING
+        // division (+1 ms margin) so the input definitely clears the threshold.
         let threshold_cycles = (WDT_MAX_LOAD as u64 + 1) << WDT_LOAD_RESEV;
         let big_ms = (threshold_cycles * 1000).div_ceil(WDT_CLOCK_HZ as u64) + 1;
-        // big_ms may exceed u32; saturate the *input* to u32 like the real API would receive.
         let ms = big_ms.min(u32::MAX as u64) as u32;
-        assert_eq!(load_field(ms), WDT_MAX_LOAD);
+        assert!(WdtTimeout::from_ms(ms).is_none());
     }
 
     #[test]
@@ -368,32 +452,32 @@ mod tests {
 
 #[cfg(all(test, not(target_arch = "riscv32")))]
 mod proptests {
-    use super::{WDT_CLOCK_HZ, WDT_LOAD_RESEV, WDT_MAX_LOAD};
+    use super::{WDT_MAX_LOAD, WdtTimeout};
     use proptest::prelude::*;
 
-    fn load_field(timeout_ms: u32) -> u32 {
-        let cycles = (timeout_ms as u64 * WDT_CLOCK_HZ as u64) / 1000;
-        (cycles >> WDT_LOAD_RESEV).min(WDT_MAX_LOAD as u64) as u32
-    }
-
     proptest! {
-        /// Fuzz: the load field is always within the 24-bit max for any u32 timeout.
+        /// Fuzz: `WdtTimeout::from_ms` never panics for any u32 (incl. 0 and
+        /// u32::MAX) — it returns `None` out of range instead of overflowing/clamping.
         #[test]
-        fn load_field_never_exceeds_max(ms in any::<u32>()) {
-            prop_assert!(load_field(ms) <= WDT_MAX_LOAD);
+        fn from_ms_never_panics(ms in any::<u32>()) {
+            let _ = WdtTimeout::from_ms(ms);
         }
 
-        /// Fuzz: the conversion never panics (no overflow) for any u32 timeout.
+        /// Fuzz: every timeout that `WdtTimeout` ACCEPTS programs a load field within
+        /// the 24-bit max (invalid timeouts are rejected up front, so this is the
+        /// only path that reaches `configure`).
         #[test]
-        fn load_field_never_panics(ms in any::<u32>()) {
-            let _ = load_field(ms);
+        fn accepted_timeout_fits_field(ms in any::<u32>()) {
+            if let Some(t) = WdtTimeout::from_ms(ms) {
+                prop_assert!(t.load_field() <= WDT_MAX_LOAD);
+            }
         }
 
-        /// Fuzz: monotonic — a longer timeout never yields a smaller load field.
+        /// Fuzz: acceptance is monotone — if a timeout is accepted, every smaller
+        /// non-zero timeout is accepted too (the valid range is a contiguous interval).
         #[test]
-        fn load_field_is_monotonic(a in any::<u32>(), b in any::<u32>()) {
-            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-            prop_assert!(load_field(hi) >= load_field(lo));
+        fn acceptance_is_monotone(ms in 1u32..=WdtTimeout::MAX_MS) {
+            prop_assert!(WdtTimeout::from_ms(ms).is_some());
         }
     }
 }
