@@ -576,15 +576,14 @@ mod tests {
     #[cfg(feature = "chip-ws63")]
     #[test]
     fn i2s_version_live() {
-        use hal::i2s::{I2sConfig, I2sDriver};
-        // Enable the I2S clk (bit 12) + bus (bit 11) gates so the block is live.
-        // SAFETY: RMW-set of clock-enable bits; keeps other clocks running.
-        let crg = unsafe { &*pac::CldoCrg::PTR };
-        crg.cken_ctl0().modify(|r, w| unsafe { w.bits(r.bits() | (1 << 12) | (1 << 11)) });
-
+        use hal::i2s::{I2sDriver, MasterConfig};
+        // `new_master` self-enables the I2S clk (bit 12) + bus (bit 11) gates and the
+        // CMU divider reset-sync, then configures the block (master, I2S, 16-bit).
         // SAFETY: sequential single-hart run; I2S singleton not otherwise held.
-        let mut i2s = I2sDriver::new(unsafe { hal::peripherals::I2s::steal() });
-        i2s.configure(&I2sConfig::default());
+        let i2s = I2sDriver::new_master(
+            unsafe { hal::peripherals::I2s::steal() },
+            &MasterConfig::default(),
+        );
 
         let ver = i2s.version();
         assert!(
