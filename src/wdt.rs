@@ -319,13 +319,55 @@ impl<'d> Watchdog<'d> {
     pub fn is_busy(&self) -> bool {
         self.regs().wdt_status().read().bits() & 0x01 == 0
     }
+
+    /// Consume the watchdog, leaving it **armed** past this scope — the escape hatch
+    /// from the disabling [`Drop`](Watchdog#impl-Drop-for-Watchdog). Use this once
+    /// the watchdog must keep guarding the system after the configuring code
+    /// returns (the normal production case). Returns a [`WatchdogArmed`] marker so
+    /// the intent is explicit.
+    #[must_use = "the watchdog is now armed forever; bind the marker to make that explicit"]
+    pub fn into_armed(self) -> WatchdogArmed {
+        core::mem::forget(self); // skip the disabling Drop — keep guarding the system
+        WatchdogArmed(())
+    }
+
+    /// Alias for [`into_armed`](Self::into_armed): consume the handle and leave the
+    /// watchdog running.
+    #[must_use = "the watchdog is now armed forever; bind the marker to make that explicit"]
+    pub fn leak(self) -> WatchdogArmed {
+        self.into_armed()
+    }
+}
+
+/// Proof token from [`Watchdog::into_armed`] / [`Watchdog::leak`]: the watchdog was
+/// intentionally left armed past the driver's scope (no disabling `Drop` ran).
+#[derive(Debug)]
+#[must_use]
+pub struct WatchdogArmed(());
+
+impl Drop for Watchdog<'_> {
+    /// Scoped safety: a dropped (un-armed) watchdog is **stopped** so it cannot
+    /// reset the system after its configuring scope ends. Clears only `WDT_CR.wdt_en`
+    /// under the lock handshake — never a shared clock gate. Call
+    /// [`Watchdog::into_armed`] to keep it guarding past the handle's scope.
+    fn drop(&mut self) {
+        self.disable();
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────
 
 #[cfg(all(test, not(target_arch = "riscv32")))]
 mod tests {
-    use super::{ResetPulseLength, WDT_CLOCK_HZ, WDT_LOAD_RESEV, WDT_MAX_LOAD, WdtMode, WdtTimeout};
+    use super::{ResetPulseLength, WatchdogArmed, WDT_CLOCK_HZ, WDT_LOAD_RESEV, WDT_MAX_LOAD, WdtMode, WdtTimeout};
+
+    /// The `into_armed`/`leak` escape-hatch marker is zero-sized (a pure type-level
+    /// proof token). The disabling-Drop register effect itself is HIL-validated on
+    /// silicon (`wdt_drop_disables_unless_armed`) — the host has no MMIO.
+    #[test]
+    fn armed_marker_is_zero_sized() {
+        assert_eq!(core::mem::size_of::<WatchdogArmed>(), 0);
+    }
 
     /// The `WDT_LOAD` field a *valid* `WdtTimeout` programs — `from_ms(ms)` then the
     /// private `load_field()`. Panics on an out-of-range `ms` (the test's contract:

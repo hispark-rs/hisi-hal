@@ -571,6 +571,46 @@ mod tests {
         wdt.disable();
     }
 
+    /// drop-to-disable (Area E) on silicon: a dropped `Watchdog` clears `WDT_CR.wdt_en`
+    /// (scoped safety — it cannot reset the board after its scope), while
+    /// `into_armed()` is the escape hatch that keeps it enabled. Configured with
+    /// **reset DISABLED**, so even the briefly-armed window cannot reboot the board.
+    #[cfg(feature = "chip-ws63")]
+    #[test]
+    fn wdt_drop_disables_unless_armed() {
+        use hal::wdt::{ResetPulseLength, Watchdog, WdtMode, WdtTimeout};
+        let r = unsafe { &*pac::Wdt::PTR };
+        let cfg = |wdt: &mut Watchdog| {
+            wdt.configure(
+                WdtTimeout::from_ms(1_000).unwrap(),
+                WdtMode::SingleInterrupt,
+                false, // reset DISABLED — armed window cannot reboot the board
+                ResetPulseLength::Cycles2,
+            )
+            .expect("configure on live silicon");
+        };
+
+        // Dropping the handle clears the enable bit.
+        {
+            // SAFETY: sequential single-hart run; WDT singleton not otherwise held.
+            let mut wdt = Watchdog::new(unsafe { hal::peripherals::Wdt::steal() });
+            cfg(&mut wdt);
+            assert_eq!(r.wdt_cr().read().bits() & 0x1, 0x1, "WDT not enabled after configure");
+        } // <- Drop runs here
+        assert_eq!(r.wdt_cr().read().bits() & 0x1, 0x0, "drop did not clear WDT_CR.wdt_en");
+
+        // The escape hatch keeps it armed past the scope.
+        {
+            let mut wdt = Watchdog::new(unsafe { hal::peripherals::Wdt::steal() });
+            cfg(&mut wdt);
+            let _armed = wdt.into_armed(); // no disabling Drop
+        }
+        assert_eq!(r.wdt_cr().read().bits() & 0x1, 0x1, "into_armed must keep WDT enabled");
+
+        // Cleanup: stop the armed watchdog so the harness continues cleanly.
+        Watchdog::new(unsafe { hal::peripherals::Wdt::steal() }).disable();
+    }
+
     /// I2S register liveness (i2s.rs). I2S is clock-gated (CKEN_CTL0 bit 12 = clk,
     /// bit 11 = bus — `sio_porting.c`); enable both, `configure` the block (master,
     /// I2S, 16-bit) without faulting, and assert the IP `version` register reads a

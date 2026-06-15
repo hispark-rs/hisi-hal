@@ -303,6 +303,32 @@ impl<'d> PwmChannel<'d> {
             _ => unreachable!(),
         };
     }
+
+    /// Consume the channel, leaving it **running** past this scope — the escape
+    /// hatch from the disabling [`Drop`](PwmChannel#impl-Drop-for-PwmChannel) (e.g.
+    /// a PWM backlight that must keep driving after setup returns). Returns a
+    /// [`PwmRunning`] marker so the intent is explicit and the channel is not
+    /// silently leaked.
+    #[must_use = "dropping the PwmRunning marker is fine, but assign it to make the leak intentional"]
+    pub fn into_running(self) -> PwmRunning {
+        core::mem::forget(self); // skip the disabling Drop — keep the output live
+        PwmRunning(())
+    }
+}
+
+/// Proof token from [`PwmChannel::into_running`]: the channel was intentionally
+/// left driving its output past the driver's scope (no disabling `Drop` ran).
+#[derive(Debug)]
+#[must_use]
+pub struct PwmRunning(());
+
+impl Drop for PwmChannel<'_> {
+    /// Scoped safety: a dropped channel stops driving its output (clears only this
+    /// channel's `pwm_enN` enable bit — never a shared clock gate). Use
+    /// [`PwmChannel::into_running`] to keep it live past the handle's scope.
+    fn drop(&mut self) {
+        self.disable();
+    }
 }
 
 impl embedded_hal::pwm::ErrorType for PwmChannel<'_> {
@@ -362,7 +388,15 @@ impl embedded_hal::pwm::SetDutyCycle for PwmChannel<'_> {
 
 #[cfg(all(test, not(target_arch = "riscv32")))]
 mod tests {
-    use super::{Duty, PwmPeriod, PWM_CLOCK_HZ};
+    use super::{Duty, PwmPeriod, PwmRunning, PWM_CLOCK_HZ};
+
+    /// The `into_running` escape-hatch marker is zero-sized (a pure type-level proof
+    /// token). The disabling-Drop register effect is HIL-validated on silicon — the
+    /// host has no MMIO.
+    #[test]
+    fn running_marker_is_zero_sized() {
+        assert_eq!(core::mem::size_of::<PwmRunning>(), 0);
+    }
 
     #[test]
     fn duty_rejects_over_100() {

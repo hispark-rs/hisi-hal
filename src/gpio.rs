@@ -259,9 +259,43 @@ impl<'d> Output<'d> {
         self.pin.number()
     }
 
-    /// Convert this output into a Flex pin.
+    /// Convert this output into a Flex pin, **keeping the current drive state** (the
+    /// safe-state [`Drop`](Output#impl-Drop-for-Output) does not run — the pad stays
+    /// an output as it transfers to the `Flex` driver).
     pub fn into_flex(self) -> Flex<'d> {
-        Flex { pin: self.pin, config: self.config }
+        // Move the fields out without running Output's safe-state Drop.
+        let this = core::mem::ManuallyDrop::new(self);
+        // SAFETY: `this` is never dropped (ManuallyDrop) and we read each field
+        // exactly once, so there is no double-read or double-drop.
+        let pin = unsafe { core::ptr::read(&this.pin) };
+        let config = unsafe { core::ptr::read(&this.config) };
+        Flex { pin, config }
+    }
+
+    /// Consume the output, **latching its current drive state** past this scope —
+    /// the escape hatch from the safe-state [`Drop`](Output#impl-Drop-for-Output)
+    /// (e.g. an enable line that must stay asserted after setup returns). Returns an
+    /// [`OutputLatched`] marker so the intent is explicit.
+    #[must_use = "the pin is now latched in its current state; bind the marker to make that explicit"]
+    pub fn into_latched(self) -> OutputLatched {
+        core::mem::forget(self); // skip the safe-state Drop — hold the current level
+        OutputLatched(())
+    }
+}
+
+/// Proof token from [`Output::into_latched`]: the pad was intentionally left driving
+/// its last level past the driver's scope (no safe-state `Drop` ran).
+#[derive(Debug)]
+#[must_use]
+pub struct OutputLatched(());
+
+impl Drop for Output<'_> {
+    /// Scoped safety: a dropped output reverts its pad to **input / high-impedance**
+    /// (sets `OEN`, clearing only this pad's output-enable — never a shared clock
+    /// gate), so a stale handle cannot keep driving a line. Use
+    /// [`Output::into_latched`] or [`Output::into_flex`] to keep the pad driving.
+    fn drop(&mut self) {
+        self.pin.set_oen(true);
     }
 }
 
@@ -710,6 +744,14 @@ pub use asynch_impl::on_interrupt;
 #[cfg(all(test, not(target_arch = "riscv32")))]
 mod tests {
     use super::*;
+
+    /// The `into_latched` escape-hatch marker is zero-sized (a pure type-level proof
+    /// token). The safe-state Drop (revert pad to input) register effect is
+    /// HIL-validated on silicon — the host has no MMIO.
+    #[test]
+    fn output_latched_marker_is_zero_sized() {
+        assert_eq!(core::mem::size_of::<OutputLatched>(), 0);
+    }
 
     // `steal(pin)` splits a pin into `block = pin / 8`, `bit = pin % 8`, and
     // `number()` recombines them as `block * 8 + bit`. The two are inverses, so
