@@ -238,11 +238,7 @@ impl<T> Uart<'_, T> {
         // track a single-byte pop (gating on it loops forever / re-reads a stale
         // byte — the cause of the long-broken `uart1_loopback`). `rx_fifo_cnt`
         // decrements correctly as each `data` read drains the FIFO.
-        if r.rx_fifo_cnt().read().bits() == 0 {
-            None
-        } else {
-            Some(r.data().read().bits() as u8)
-        }
+        if r.rx_fifo_cnt().read().bits() == 0 { None } else { Some(r.data().read().bits() as u8) }
     }
 
     /// Block until UART `idx`'s TX FIFO is fully drained.

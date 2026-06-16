@@ -907,7 +907,10 @@ mod tests {
         uart.write_byte(1, sent);
         let mut got = None;
         for _ in 0..2_000_000u32 {
-            if let Some(b) = uart.read_byte(1) { got = Some(b); break; }
+            if let Some(b) = uart.read_byte(1) {
+                got = Some(b);
+                break;
+            }
         }
         // NOTE: the loop requires the jumper to be on the ACTUAL UART1 TXD/RXD pads.
         // The HAL pinmux (uart1_txd_sel/rxd_sel = 1) matches the vendor SDK, and
