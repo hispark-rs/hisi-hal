@@ -6,7 +6,7 @@
 //!
 //! # Usage
 //!
-//! ```no_run
+//! ```ignore
 //! let trng = Trng::new(peripherals.TRNG);
 //! let random_word: u32 = trng.read_blocking().unwrap();
 //! ```

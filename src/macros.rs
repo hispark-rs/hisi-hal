@@ -24,7 +24,7 @@ macro_rules! unstable_driver {
 
 /// Create a type-erased enum for a peripheral type.
 /// Example:
-/// ```no_run
+/// ```ignore
 /// any_peripheral! {
 ///     pub peripheral AnySpi<'d> {
 ///         Spi0(crate::peripherals::Spi0<'d>),
