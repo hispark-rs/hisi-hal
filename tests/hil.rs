@@ -745,6 +745,66 @@ mod tests {
         assert_ne!(status, 0xFFFF_FFFF, "GADC status read returned the all-ones bus-floating pattern");
     }
 
+    /// **Area D — rt DIRECT-mode interrupt delivery + by-number named dispatch.**
+    /// The WS63 (Nuclei) core does not service its custom interrupts through the old
+    /// VECTORED `mtvec` path (proven: `mip[26]`/`mie[26]`/`mstatus.MIE` all set yet
+    /// never taken). hisi-riscv-rt now uses DIRECT mode: every trap reaches
+    /// `trap_entry`, which routes interrupts (mcause bit 31) by IRQ number to the
+    /// weak `__rt_irq_dispatch`. We override it here and fire TIMER channel 0
+    /// (`TIMER_INT0` = IRQ 26) — asserting the dispatcher actually runs proves the
+    /// core takes the interrupt and the rt routes it, end-to-end on real silicon.
+    /// No external wiring. (Foundation for full device.x-named routing.)
+    #[cfg(feature = "chip-ws63")]
+    #[test]
+    fn timer_irq_direct_mode_dispatch() {
+        use core::sync::atomic::{AtomicBool, Ordering};
+        use hal::interrupt;
+        use hal::timer::{TimerDriver, TimerMode};
+
+        static FIRED: AtomicBool = AtomicBool::new(false);
+
+        // Overrides the rt's weak `__rt_irq_dispatch`. `irq` is the mcause IRQ
+        // number; clear + stop the timer so it can't re-fire, then record the hit.
+        #[unsafe(no_mangle)]
+        extern "C" fn __rt_irq_dispatch(irq: u32) {
+            if irq == 26 {
+                let t = TimerDriver::new(unsafe { hal::peripherals::Timer::steal() });
+                t.clear_interrupt(0);
+                t.disable(0);
+                FIRED.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let t = TimerDriver::new(unsafe { hal::peripherals::Timer::steal() });
+        // Periodic/user-defined mode counts from the load value (24 MHz TCXO → ~1
+        // ms); the handler disables it on the first fire.
+        t.configure(0, TimerMode::Periodic, 24_000);
+        // SAFETY: program the Nuclei local-interrupt priorities (LOCIPRI → 1 each;
+        // an IRQ is delivered only when priority > threshold, both 0 at reset on
+        // this silicon), enable TIMER_INT0 (mie 26) + the global machine-interrupt
+        // enable; the dispatcher above clears the source.
+        unsafe {
+            interrupt::init();
+            interrupt::enable(interrupt::Interrupt::TIMER_INT0);
+            interrupt::enable_global();
+        }
+        t.enable(0);
+
+        let mut spun = 0u32;
+        while !FIRED.load(Ordering::SeqCst) && spun < 20_000_000 {
+            spun += 1;
+            core::hint::spin_loop();
+        }
+        unsafe { interrupt::disable(interrupt::Interrupt::TIMER_INT0) };
+        t.disable(0);
+        t.clear_interrupt(0);
+
+        assert!(
+            FIRED.load(Ordering::SeqCst),
+            "direct-mode __rt_irq_dispatch(IRQ 26) never ran — rt interrupt delivery broken"
+        );
+    }
+
     // ── Loopback tests (opt-in `hil-loopback` feature; need board jumpers) ──
 
     /// GPIO output→input loopback (gpio.rs + io_config.rs). Drive GPIO0 as a
