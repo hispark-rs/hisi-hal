@@ -6,6 +6,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-30
+
+### Added
+
+- **Peripheral-paced DMA (SPI)** — the deferred Area C (hisi-riscv-hal#6) lands for
+  SPI, silicon-validated on real WS63:
+  - `DmaDriver::start_mem_to_peripheral` / `start_peripheral_to_mem` + the
+    `PeripheralTransfer<'d, BUF>` guard (owns driver + channel + the single memory
+    buffer; `wait()` returns `Result` — a wedged channel is `Err(Timeout)`, not
+    silently "done"). `Drop` runs cancel-then-quiesce (clear the peripheral
+    DMA-enable first, then halt → drain `active` → disable).
+  - `DmaChannel` / `DmaChannels` typed tokens + `DmaDriver::split_channels()` — a
+    runtime-claimed channel-ownership bitmask (no-atomics-safe). At most one
+    in-flight transfer per channel.
+  - `DmaFrame` (Byte/HalfWord) + `PeriKind`/`PeriDmaCtl` (a POD teardown handle that
+    clears the peripheral DMA-enable, so the guard needn't be generic over the driver).
+  - `Spi::with_dma(self, DmaDriver) -> SpiDma` (consumes the blocking `Spi` — blocking
+    + DMA APIs are mutually exclusive, esp-hal style). `SpiDma::write_dma` (TX-only,
+    drains looped-back RX) and `SpiDma::transfer_dma` (full-duplex, two channels);
+    both blocking, bounded-wait, with the vendor handshake order
+    (watermark → clean → start → set `spi_dcr.tdmae`). `SpiDma::release`.
+  - `SpiError::BufferTooLong` for the >4095-beat `trans_size` cap (no silent truncation).
+  - HIL `spi_dma_tx_loopback` + `spi_dma_fullduplex_loopback` — both PASS on silicon.
+- **`UartDma`** (`Uart::with_dma`/`write_dma`/`read_dma`/`release`) — the UART DMA
+  ergonomic API (P3). The register sequence compiles and is correct, but loopback
+  data-correctness is **blocked by hisi-riscv-hal#5** (UART1 TX shift register
+  doesn't advance on this board); silicon round-trip deferred to a #5-fixed board.
+
+### Changed
+
+- **`DmaDriver`: `Transfer::wait` (mem-to-mem) now quiesces on timeout** (halt → drain
+  `active` → disable) before returning the buffers — was handing back a live channel
+  (a latent UAF on a wedged transfer). `Transfer::drop` gains the same `active`-bit
+  settle (clearing `ch_enable` mid-burst could let an outstanding bus write land after
+  the buffer is freed). Both backported from the peripheral-DMA design review.
+
+### Notes
+
+- The SPI1 handshake (QSPI0_2CS 9/10 vs the legacy SPI_MS1 13/14) is **silicon-
+  unverified** and intentionally NOT changed in 0.5.1 — `DmaPeripheral::Spi1Tx/Rx`
+  remain 13/14. The correct `Qspi02csTx/Rx` variant is deferred to when SPI1 DMA is
+  wired and silicon-verified (adding it now would be a breaking enum change for an
+  unverified claim).
+- Pure SPI RX-only `read_dma` is descoped to 0.5.2 (can't loopback-test on a
+  single-SPI0 board with no external master).
+- Async `.await` DMA variants (P4) are not in 0.5.1 — deferred to 0.5.2.
+
 ## [0.5.0] - 2026-06-16
 
 ### Changed
