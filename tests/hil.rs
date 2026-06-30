@@ -927,7 +927,7 @@ mod tests {
     /// and returns `Ok` on completion. The first silicon proof of the `SpiDma`
     /// wrapper (vendor handshake order, cache clean, bounded wait, teardown).
     /// **Requires the GPIO9→GPIO11 (MOSI→MISO) jumper.**
-    #[cfg(all(feature = "chip-ws63", feature = "hil-loopback"))]
+    #[cfg(all(feature = "chip-ws63", feature = "hil-loopback", feature = "unstable"))]
     #[test]
     fn spi_dma_tx_loopback() {
         use hal::dma::{Dma0, DmaDriver};
@@ -961,7 +961,7 @@ mod tests {
     /// GPIO9→GPIO11 (MOSI→MISO) jumper, rx_buf must equal tx_buf. Proves the
     /// ergonomic wrapper + dual-channel concurrency + RX-side invalidate on silicon.
     /// **Requires the GPIO9→GPIO11 jumper.**
-    #[cfg(all(feature = "chip-ws63", feature = "hil-loopback"))]
+    #[cfg(all(feature = "chip-ws63", feature = "hil-loopback", feature = "unstable"))]
     #[test]
     fn spi_dma_fullduplex_loopback() {
         use hal::dma::{Dma0, DmaDriver};
@@ -1053,7 +1053,7 @@ mod tests {
     /// parks on `wfi` until IRQ59 wakes it. If this returns (rather than hanging),
     /// async `.await` DMA is viable on this silicon. **Requires the GPIO9→GPIO11
     /// jumper.**
-    #[cfg(all(feature = "chip-ws63", feature = "hil-loopback", feature = "async"))]
+    #[cfg(all(feature = "chip-ws63", feature = "hil-loopback", feature = "async", feature = "unstable"))]
     #[test]
     fn spi_dma_irq59_fires_on_completion() {
         use hal::asynch::block_on;
@@ -1113,7 +1113,7 @@ mod tests {
     /// **P4 async capstone**: `SpiDma::write_dma_async` via `block_on` — the
     /// ergonomic async API on silicon. Drives MOSI via DMA parking on IRQ 59 (wfi)
     /// until completion. **Requires the GPIO9→GPIO11 jumper + the `async` feature.**
-    #[cfg(all(feature = "chip-ws63", feature = "hil-loopback", feature = "async"))]
+    #[cfg(all(feature = "chip-ws63", feature = "hil-loopback", feature = "async", feature = "unstable"))]
     #[test]
     fn spi_dma_write_async() {
         use hal::asynch::block_on;

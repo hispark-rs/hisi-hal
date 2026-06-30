@@ -551,6 +551,7 @@ impl<'d, T> SpiDma<'d, T> {
     /// (transfer_int = true), sets tdmae+rdmae, and awaits each channel's
     /// completion on IRQ 59 in turn (the per-channel demux means awaiting the second
     /// doesn't false-wake on the first). Requires `async` + global interrupts.
+    #[instability::unstable]
     #[cfg(feature = "async")]
     pub async fn transfer_dma_async<
         RB: embedded_dma::WriteBuffer<Word = u8>,
@@ -624,6 +625,7 @@ impl<'d, T> SpiDma<'d, T> {
 
     /// Reclaim the blocking `Spi` and the `DmaDriver`. Clears any peripheral
     /// DMA-enable the DMA paths may have set.
+    #[instability::unstable]
     pub fn release(self) -> (Spi<'d, T>, crate::dma::DmaDriver<'d, crate::dma::Dma0>) {
         let r = spi_regs(self.idx);
         r.spi_dcr().modify(|_, w| w.tdmae().clear_bit().rdmae().clear_bit());

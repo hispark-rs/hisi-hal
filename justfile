@@ -35,7 +35,9 @@ semver:
 
 # Build + run the on-target HIL test suite on a real WS63 over probe-rs.
 # Needs the patched probe-rs fork + hisi-fwpkg (see ../../hil/README.md).
+# `unstable` is on so the peripheral-DMA HIL tests (gated behind it) compile + run.
+# Add `,async` for the async DMA capstone (spi_dma_write_async / spi_dma_irq59).
 hil:
     CARGO_TARGET_RISCV32IMFC_UNKNOWN_NONE_ELF_RUNNER=../../hil/embedded-test-runner.sh \
-        cargo test -p hisi-riscv-hal --no-default-features --features chip-ws63 \
+        cargo test -p hisi-riscv-hal --no-default-features --features chip-ws63,unstable \
         --target riscv32imfc-unknown-none-elf --test hil

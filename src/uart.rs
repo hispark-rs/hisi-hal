@@ -268,6 +268,7 @@ impl<T> Uart<'_, T> {
 #[cfg(feature = "chip-ws63")]
 impl<'d> Uart<'d, Uart0<'d>> {
     /// Consume the blocking UART0 + a DMA driver → DMA-capable [`UartDma`] (idx 0).
+    #[instability::unstable]
     pub fn with_dma(self, dma: crate::dma::DmaDriver<'d, crate::dma::Dma0>) -> UartDma<'d, Uart0<'d>> {
         UartDma { idx: 0, dma, _p: PhantomData }
     }
@@ -275,6 +276,7 @@ impl<'d> Uart<'d, Uart0<'d>> {
 #[cfg(feature = "chip-ws63")]
 impl<'d> Uart<'d, Uart1<'d>> {
     /// Consume the blocking UART1 + a DMA driver → DMA-capable [`UartDma`] (idx 1).
+    #[instability::unstable]
     pub fn with_dma(self, dma: crate::dma::DmaDriver<'d, crate::dma::Dma0>) -> UartDma<'d, Uart1<'d>> {
         UartDma { idx: 1, dma, _p: PhantomData }
     }
@@ -282,6 +284,7 @@ impl<'d> Uart<'d, Uart1<'d>> {
 #[cfg(feature = "chip-ws63")]
 impl<'d> Uart<'d, Uart2<'d>> {
     /// Consume the blocking UART2 + a DMA driver → DMA-capable [`UartDma`] (idx 2).
+    #[instability::unstable]
     pub fn with_dma(self, dma: crate::dma::DmaDriver<'d, crate::dma::Dma0>) -> UartDma<'d, Uart2<'d>> {
         UartDma { idx: 2, dma, _p: PhantomData }
     }
@@ -292,14 +295,16 @@ impl<'d> Uart<'d, Uart2<'d>> {
 /// register block (binding the `DmaPeripheral` to the type, compile-time, rather
 /// than re-deriving from a runtime idx).
 ///
-/// `write_dma` (TX) is silicon-verified (channel completion + register sequence).
-/// `read_dma` (RX, fixed-length) is provided but its loopback data-correctness is
-/// **blocked by hisi-riscv-hal#5** (the UART1 TX→RX physical loopback doesn't close
-/// on this board); it compiles and the register sequence is correct, but cannot be
-/// round-trip-verified here. The `uart_parameter.dma_mode` field is PAC-read-only,
-/// so DMA pacing is driven by the FIFO_CTL trigger levels (the design's P3
-/// silicon question — answered: it works with triggers alone).
+/// **UNSTABLE** (behind the `unstable` feature): no UartDma HIL test exists — the
+/// `write_dma` (TX) silicon attempt timed out (the UART1 TX shift register never
+/// advances on this board, `hisi-riscv-hal#5`), and `read_dma` (RX, fixed-length)
+/// loopback is blocked by the same #5 board issue. The register sequence compiles
+/// and is correct, but round-trip verification is deferred to a #5-fixed board.
+/// The `uart_parameter.dma_mode` field is PAC-read-only, so DMA pacing is driven
+/// by the FIFO_CTL trigger levels (the design's P3 silicon question — answered:
+/// it works with triggers alone).
 #[cfg(feature = "chip-ws63")]
+#[instability::unstable]
 pub struct UartDma<'d, T> {
     idx: u8,
     dma: crate::dma::DmaDriver<'d, crate::dma::Dma0>,
@@ -337,6 +342,7 @@ impl<'d, T> UartDma<'d, T> {
     /// Write `buf` to the UART TX FIFO via DMA (mem→peripheral). `buf` is owned for
     /// the whole call and returned on success. `ch` is a claimed
     /// [`DmaChannel`](crate::dma::DmaChannel) token.
+    #[instability::unstable]
     pub fn write_dma<B: embedded_dma::ReadBuffer<Word = u8>>(
         &mut self,
         ch: crate::dma::DmaChannel,
@@ -399,6 +405,7 @@ impl<'d, T> UartDma<'d, T> {
     /// for the whole call and returned on success. **Loopback data-correctness is
     /// blocked by hisi-riscv-hal#5** on this board; the register sequence compiles
     /// and is correct but cannot be round-trip-verified here.
+    #[instability::unstable]
     pub fn read_dma<B: embedded_dma::WriteBuffer<Word = u8>>(
         &mut self,
         ch: crate::dma::DmaChannel,
@@ -451,6 +458,7 @@ impl<'d, T> UartDma<'d, T> {
 
     /// Reclaim the blocking `Uart` and the `DmaDriver`. Restores the blocking
     /// FIFO_CTL trigger levels.
+    #[instability::unstable]
     pub fn release(self) -> (Uart<'d, T>, crate::dma::DmaDriver<'d, crate::dma::Dma0>) {
         let r = self.regs();
         r.fifo_ctl().modify(|_, w| w.tx_empty_trig().empty().rx_empty_trig().char1());

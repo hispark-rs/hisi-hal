@@ -517,6 +517,8 @@ impl DmaPeripheral {
 }
 
 /// DMA transfer direction.
+#[cfg(feature = "chip-ws63")]
+#[instability::unstable]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DmaDirection {
     /// Transmit (memory to peripheral).
@@ -530,6 +532,7 @@ impl DmaChannelConfig {
     /// sets `MemToPeripheral` flow control, the destination handshaking ID, and
     /// holds the destination address fixed (a peripheral data register).
     #[cfg(feature = "chip-ws63")]
+    #[instability::unstable]
     pub fn mem_to_peripheral(mut self, peri: DmaPeripheral) -> Self {
         self.flow_control = FlowControl::MemToPeripheral;
         self.dst_peripheral = peri.request_id();
@@ -541,6 +544,7 @@ impl DmaChannelConfig {
     /// sets `PeripheralToMem` flow control, the source handshaking ID, and holds
     /// the source address fixed (a peripheral data register).
     #[cfg(feature = "chip-ws63")]
+    #[instability::unstable]
     pub fn peripheral_to_mem(mut self, peri: DmaPeripheral) -> Self {
         self.flow_control = FlowControl::PeripheralToMem;
         self.src_peripheral = peri.request_id();
@@ -736,6 +740,8 @@ fn cancel_then_quiesce(peri_dis: &mut PeriDmaCtl, driver: &mut DmaDriver<'_, Dma
 
 /// Errors from a peripheral-paced DMA transfer.
 #[derive(Debug)]
+#[cfg(feature = "chip-ws63")]
+#[instability::unstable]
 #[non_exhaustive]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum DmaError {
@@ -754,6 +760,7 @@ pub enum DmaError {
 /// frame size (UART = byte, SPI = byte for `DataBits ≤ 8` else halfword), never the
 /// mem-to-mem default `Width32`.
 #[cfg(feature = "chip-ws63")]
+#[instability::unstable]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DmaFrame {
     /// 8-bit beat (`TransferWidth::Width8`).
@@ -777,6 +784,7 @@ impl DmaFrame {
 /// Which kind of peripheral a [`PeriDmaCtl`] controls — selects the register layout
 /// for clearing the peripheral-side DMA-enable on teardown.
 #[cfg(feature = "chip-ws63")]
+#[instability::unstable]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeriKind {
     /// SPI (SSI v151): `spi_dcr` @ base+0x18, `tdmae`/`rdmae`.
@@ -789,6 +797,8 @@ pub enum PeriKind {
 /// [`PeripheralTransfer`] guard can stop the peripheral asserting DMA requests
 /// without being generic over the driver. Built by the driver's `with_dma`.
 #[cfg(feature = "chip-ws63")]
+#[cfg(feature = "chip-ws63")]
+#[instability::unstable]
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(not(target_arch = "riscv32"), allow(dead_code))]
 pub struct PeriDmaCtl {
@@ -803,6 +813,7 @@ pub struct PeriDmaCtl {
 #[cfg(feature = "chip-ws63")]
 impl PeriDmaCtl {
     /// Build a teardown handle for a peripheral at `base` with the given kind/dir.
+    #[instability::unstable]
     pub const fn new(base: usize, kind: PeriKind, dir: DmaDirection) -> Self {
         Self { base, kind, dir }
     }
@@ -935,6 +946,7 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// Returns [`DmaError::TransferTooLarge`] if `src` exceeds 4095 beats (a
     /// single-block DMA `trans_size` cap — chunk the buffer). On `Err` the driver,
     /// channel, and buffer are dropped (the channel claim is released).
+    #[instability::unstable]
     pub fn start_mem_to_peripheral<SRC>(
         mut self,
         channel: DmaChannel,
@@ -982,6 +994,7 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// returning a [`PeripheralTransfer`] guard. The destination cache is invalidated
     /// on [`wait`](PeripheralTransfer::wait) AFTER completion. See
     /// [`start_mem_to_peripheral`] for the lifetime / cap / teardown contract.
+    #[instability::unstable]
     pub fn start_peripheral_to_mem<DST>(
         mut self,
         channel: DmaChannel,
@@ -1031,6 +1044,7 @@ impl<'d> DmaDriver<'d, Dma0> {
 /// an active DMA region unrepresentable in safe code: the buffer cannot be touched,
 /// moved, or freed while the DMA reads/writes it.
 #[cfg(feature = "chip-ws63")]
+#[instability::unstable]
 pub struct PeripheralTransfer<'d, BUF> {
     driver: DmaDriver<'d, Dma0>,
     channel: DmaChannel,
@@ -1044,6 +1058,7 @@ pub struct PeripheralTransfer<'d, BUF> {
 #[cfg(feature = "chip-ws63")]
 impl<'d, BUF> PeripheralTransfer<'d, BUF> {
     /// True once the channel has auto-cleared its enable bit (single-block done).
+    #[instability::unstable]
     pub fn is_done(&self) -> bool {
         !self.driver.channel_enabled(self.channel.logical)
     }
@@ -1057,6 +1072,7 @@ impl<'d, BUF> PeripheralTransfer<'d, BUF> {
     /// and buffer are dropped — the channel claim is released, the buffer is safe
     /// because the engine was stopped). A wedged transfer is therefore *observable*,
     /// not silently "done" — the UAF-on-timeout hole the mem-to-mem guard had.
+    #[instability::unstable]
     pub fn wait(self) -> Result<(DmaDriver<'d, Dma0>, DmaChannel, BUF), DmaError> {
         // Skip the abort-on-drop: the transfer is completing normally.
         let mut this = ManuallyDrop::new(self);
@@ -1126,6 +1142,7 @@ impl<BUF> Drop for PeripheralTransfer<'_, BUF> {
 impl DmaChannelConfig {
     /// Set both source and destination transfer width (peripheral and memory sides
     /// share the frame width for a peripheral-paced transfer).
+    #[instability::unstable]
     pub fn with_width(mut self, frame: DmaFrame) -> Self {
         let w = frame.width();
         self.src_width = w;
@@ -1135,6 +1152,7 @@ impl DmaChannelConfig {
 
     /// Enable the transfer-complete interrupt (required for the async `.await` path
     /// and so `dmac_int_st` reflects per-channel completion).
+    #[instability::unstable]
     pub fn with_transfer_int(mut self, on: bool) -> Self {
         self.transfer_int = on;
         self
