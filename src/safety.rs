@@ -55,7 +55,7 @@ use crate::clock::PERIPHERAL_COUNT;
 const_assert!(crate::soc::chip::SYSTEM_CLOCK_HZ == 240_000_000, "SYSTEM_CLOCK_HZ must be 240MHz (CPU/PLL clock)");
 // The Timer/WDT count at the TCXO crystal (TIMER_CLOCK_HZ), not the CPU clock.
 const_assert!(
-    crate::soc::chip::TIMER_CLOCK_HZ % 1_000_000 == 0 && crate::soc::chip::TIMER_CLOCK_HZ >= 1_000_000,
+    crate::soc::chip::TIMER_CLOCK_HZ.is_multiple_of(1_000_000) && crate::soc::chip::TIMER_CLOCK_HZ >= 1_000_000,
     "TIMER_CLOCK_HZ must be a whole number of MHz so us->ticks is exact"
 );
 // Verify the maximum safe us value for the timer is computable at the timer clock.
