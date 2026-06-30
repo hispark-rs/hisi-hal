@@ -246,6 +246,7 @@ mod tests {
     // is unset in every build, g_sdma_base_addr is never assigned), so the secure
     // block is never provisioned on silicon — a transfer there stalls AXI and
     // drops the debug link.
+    #[cfg(feature = "chip-ws63")]
     #[test]
     fn dma_mem_to_mem() {
         use hal::dma::{Dma0, DmaChannelConfig, DmaDriver};

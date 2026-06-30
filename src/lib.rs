@@ -134,10 +134,12 @@ unstable_module! {
 /// I2C driver (WS63 custom v150 core).
 #[cfg(feature = "chip-ws63")]
 pub mod i2c;
-/// I2C driver (BS2X Synopsys DesignWare v151 core).
-#[cfg(feature = "chip-bs21")]
-#[path = "i2c_v151.rs"]
-pub mod i2c;
+unstable_module! {
+    /// I2C driver (BS2X Synopsys DesignWare v151 core).
+    #[cfg(feature = "chip-bs21")]
+    #[path = "i2c_v151.rs"]
+    pub mod i2c;
+}
 /// I2S audio interface driver.
 #[cfg(feature = "chip-ws63")]
 pub mod i2s;
@@ -155,30 +157,40 @@ pub mod lsadc;
 // BS2X 13-bit ADC (v153) — chip-bs21-only (WS63's ADC is the different `lsadc`
 // v154). bs2x-pac has the correct `gadc` register block; the driver reaches the
 // ANA/PMU power sub-blocks (not in the PAC) via raw addresses. See gadc.rs.
-/// BS2X 13-bit general-purpose ADC (v153) driver.
-#[cfg(feature = "chip-bs21")]
-pub mod gadc;
+unstable_module! {
+    /// BS2X 13-bit general-purpose ADC (v153) driver.
+    #[cfg(feature = "chip-bs21")]
+    pub mod gadc;
+}
 // BS2X-only HID peripherals (no WS63 analogue): key-matrix scanner + quadrature
 // decoder. bs2x-pac has faithful register blocks; see keyscan.rs / qdec.rs.
-/// BS2X key-matrix scanner (HID) driver.
-#[cfg(feature = "chip-bs21")]
-pub mod keyscan;
+unstable_module! {
+    /// BS2X key-matrix scanner (HID) driver.
+    #[cfg(feature = "chip-bs21")]
+    pub mod keyscan;
+}
 // BS2X PDM-mic audio front-end (v150) — config-level (the PCM data path is DMA-fed).
-/// BS2X PDM microphone audio front-end (v150) driver.
-#[cfg(feature = "chip-bs21")]
-pub mod pdm;
+unstable_module! {
+    /// BS2X PDM microphone audio front-end (v150) driver.
+    #[cfg(feature = "chip-bs21")]
+    pub mod pdm;
+}
 // BS2X USB 2.0 OTG (Synopsys DWC OTG) — config-level (core-ID; full stack deferred).
 unstable_module! {
     /// Public-key engine (PKE) crypto accelerator driver.
     #[cfg(feature = "chip-ws63")]
     pub mod pke;
 }
-/// BS2X quadrature decoder (HID) driver.
-#[cfg(feature = "chip-bs21")]
-pub mod qdec;
-/// BS2X USB 2.0 OTG (Synopsys DWC OTG) config-level driver.
-#[cfg(feature = "chip-bs21")]
-pub mod usb;
+unstable_module! {
+    /// BS2X quadrature decoder (HID) driver.
+    #[cfg(feature = "chip-bs21")]
+    pub mod qdec;
+}
+unstable_module! {
+    /// BS2X USB 2.0 OTG (Synopsys DWC OTG) config-level driver.
+    #[cfg(feature = "chip-bs21")]
+    pub mod usb;
+}
 // BS2X-enabled drivers (ungated below: `pwm`, `spi`, `wdt`, `ulp_gpio`). These were
 // chip-ws63-only but build for BS2X too because (a) the driver code is already
 // chip-neutral (it goes through `crate::soc::pac` aliases), (b) their peripheral
@@ -202,10 +214,12 @@ unstable_module! {
     #[cfg(feature = "chip-ws63")]
     pub mod rtc;
 }
-/// Real-time clock driver (BS2X v150, 64-bit counter with coherent-read handshake).
-#[cfg(feature = "chip-bs21")]
-#[path = "rtc_v150.rs"]
-pub mod rtc;
+unstable_module! {
+    /// Real-time clock driver (BS2X v150, 64-bit counter with coherent-read handshake).
+    #[cfg(feature = "chip-bs21")]
+    #[path = "rtc_v150.rs"]
+    pub mod rtc;
+}
 unstable_module! {
     /// Functional-safety / lockstep support driver.
     #[cfg(feature = "chip-ws63")]
@@ -230,10 +244,12 @@ pub mod system;
 /// True random number generator driver (WS63).
 #[cfg(feature = "chip-ws63")]
 pub mod trng;
-/// True random number generator driver (BS2X v1).
-#[cfg(feature = "chip-bs21")]
-#[path = "trng_v1.rs"]
-pub mod trng;
+unstable_module! {
+    /// True random number generator driver (BS2X v1).
+    #[cfg(feature = "chip-bs21")]
+    #[path = "trng_v1.rs"]
+    pub mod trng;
+}
 /// On-chip temperature sensor driver.
 #[cfg(feature = "chip-ws63")]
 pub mod tsensor;
