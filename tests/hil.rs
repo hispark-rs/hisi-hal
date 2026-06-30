@@ -930,7 +930,7 @@ mod tests {
     #[cfg(all(feature = "chip-ws63", feature = "hil-loopback"))]
     #[test]
     fn spi_dma_tx_loopback() {
-        use hal::dma::{Dma0, DmaDriver, DmaChannel, DmaFrame, DmaPeripheral, PeriDmaCtl, PeriKind, DmaDirection};
+        use hal::dma::{Dma0, DmaChannel, DmaDirection, DmaDriver, DmaFrame, DmaPeripheral, PeriDmaCtl, PeriKind};
         use hal::io_config::IoConfigDriver;
         use hal::spi::{Config, Spi};
 
@@ -1012,7 +1012,7 @@ mod tests {
     #[test]
     fn spi_dma_fullduplex_loopback() {
         use hal::cache;
-        use hal::dma::{Dma0, DmaChannelConfig, DmaDriver, DmaPeripheral, TransferWidth, BurstSize};
+        use hal::dma::{BurstSize, Dma0, DmaChannelConfig, DmaDriver, DmaPeripheral, TransferWidth};
         use hal::io_config::IoConfigDriver;
         use hal::spi::{Config, Spi};
 
@@ -1093,8 +1093,11 @@ mod tests {
         while dma.channel_enabled(0) || dma.channel_enabled(1) {
             spins += 1;
             if spins > 5_000_000 {
-                panic!("SPI0 full-duplex DMA timed out (ch0={} ch1={})",
-                    dma.channel_enabled(0), dma.channel_enabled(1));
+                panic!(
+                    "SPI0 full-duplex DMA timed out (ch0={} ch1={})",
+                    dma.channel_enabled(0),
+                    dma.channel_enabled(1)
+                );
             }
             core::hint::spin_loop();
         }
