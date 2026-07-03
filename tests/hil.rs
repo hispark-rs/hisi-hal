@@ -301,6 +301,12 @@ mod tests {
 
     #[cfg(feature = "chip-ws63")]
     #[test]
+    fn wdt_leak_keeps_watchdog_armed() {
+        crate::wdt::wdt_leak_keeps_watchdog_armed();
+    }
+
+    #[cfg(feature = "chip-ws63")]
+    #[test]
     fn i2s_version_live() {
         crate::i2s::i2s_version_live();
     }

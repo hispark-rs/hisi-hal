@@ -70,3 +70,20 @@ pub(crate) fn wdt_drop_disables_unless_armed() {
 
     Watchdog::new(unsafe { hal::peripherals::Wdt::steal() }).disable();
 }
+
+/// WDT `leak()` escape hatch is the documented alias for `into_armed()`.
+#[cfg(feature = "chip-ws63")]
+pub(crate) fn wdt_leak_keeps_watchdog_armed() {
+    use hal::wdt::{ResetPulseLength, Watchdog, WdtMode, WdtTimeout};
+
+    let r = unsafe { &*pac::Wdt::PTR };
+    // SAFETY: sequential single-hart run; WDT singleton not otherwise held.
+    let mut wdt = Watchdog::new(unsafe { hal::peripherals::Wdt::steal() });
+    wdt.configure(WdtTimeout::from_ms(1_000).unwrap(), WdtMode::SingleInterrupt, false, ResetPulseLength::Cycles2)
+        .expect("configure on live silicon");
+    let _armed = wdt.leak();
+
+    assert_eq!(r.wdt_cr().read().bits() & 0x1, 0x1, "leak must keep WDT enabled");
+
+    Watchdog::new(unsafe { hal::peripherals::Wdt::steal() }).disable();
+}
