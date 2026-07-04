@@ -20,6 +20,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - name: lockfile preflight
+        run: |
+          set -euo pipefail
+          cargo generate-lockfile --locked
+          git ls-files --error-unmatch Cargo.lock >/dev/null
+          git diff --exit-code -- Cargo.lock
       # --no-verify: no_std riscv32 crate; the host verify build would fail. The
       # source is built/tested for the real target in the hisi-riscv-rs CI.
       - name: cargo publish
@@ -28,7 +34,8 @@ jobs:
           DRY: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
         run: |
           set -euo pipefail
-          if cargo publish --no-verify $DRY 2>&1 | tee /tmp/pub.log; then
+          cargo package --locked --no-verify
+          if cargo publish --locked --no-verify $DRY 2>&1 | tee /tmp/pub.log; then
             :
           elif grep -qiE 'already (exists|been uploaded|uploaded)|is already uploaded' /tmp/pub.log; then
             echo "This version is already on crates.io — skipping."

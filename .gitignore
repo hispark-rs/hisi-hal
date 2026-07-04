@@ -1,4 +1,1 @@
 /target
-
-# library crate — do not pin Cargo.lock (downstream resolves; standalone CI tracks the git ws63-pac patch)
-/Cargo.lock
