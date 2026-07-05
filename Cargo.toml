@@ -91,7 +91,7 @@ embedded-test-linker-script = "0.1"
 # default-features=false so the chip + boot-header + bundled-memory-x selection is
 # driven by THIS crate's chip-* features (weak `hisi-riscv-rt?/...` pulls below),
 # never linked into the firmware/host graph (this is a riscv-only dev-dep).
-hisi-riscv-rt = { version = "0.4", default-features = false }
+hisi-riscv-rt = { version = "0.5", default-features = false }
 # The semihosting embedded-test harness needs a real critical-section impl in the
 # graph; portable-atomic's RMW polyfill on this no-atomic core also routes through
 # it (impl registered by hisi-riscv-rt). Mirrors tests-hil.
