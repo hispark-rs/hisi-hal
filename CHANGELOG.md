@@ -14,78 +14,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   out-of-range error, TCXO 64-bit counter, TRNG byte fill path, and WDT counter/feed
   liveness.
 
-### Changed
-
-- **BS2X target marked experimental**: `chip-bs21` now requires the `unstable`
-  feature. This hard gate covers the whole BS2X chip target, not just BS2X-only
-  drivers, because no BS2X silicon HIL has run yet.
-
-
 ### Changed (BREAKING)
 
-- **Stable/unstable API gating** (esp-hal `instability` pattern): a new `unstable`
-  cargo feature (OFF by default) gates every surface that has **no on-silicon HIL
-  test**. Without `unstable`, the default build exposes only the HIL-proven stable
-  API; experimental surfaces require `features = ["unstable"]`. This is a breaking
-  change — previously-`pub` items are now `pub(crate)` (soft-gate) or absent when
-  `unstable` is off.
-  - Adopted the `instability = "0.3.12"` proc-macro crate (`#[instability::unstable]`
-    → `pub` when on, `pub(crate)` + `#[allow(dead_code)]` when off). MSRV 1.85 → 1.88
-    (instability requires 1.88).
-  - The old broken `unstable_module!`/`unstable_driver!` macros (`src/macros.rs`)
-    were rewritten in esp-hal crate-local form (NO `#[macro_export]`, `#[doc(hidden)]`,
-    `$(#[$meta])*` forwarding incl. `#[path]`, `#[allow(unused)]` on the `pub(crate)`
-    copy). `mod macros` is now private + `#[macro_use]`.
-  - docs.rs: `features += "unstable"` + `rustdoc-args=["--cfg","docsrs"]`; crate-level
-    `#![cfg_attr(docsrs, feature(doc_cfg, custom_inner_attributes, proc_macro_hygiene))]`
-    + `allow(invalid_doc_attributes)` + `doc(auto_cfg = false)` for "requires unstable"
-    markers (docs.rs-only nightly, esp-hal-exact).
+- **Stable/unstable API gating**: a new `unstable` cargo feature (OFF by default)
+  gates every surface without an on-silicon HIL test. Previously-`pub` items are now
+  `pub(crate)` (soft-gate) or absent when `unstable` is off. Uses `instability` 0.3.12
+  proc-macro (MSRV 1.85 → 1.88). `unstable_module!`/`unstable_driver!` macros
+  rewritten in esp-hal crate-local form. See `docs/src/reference/10-stable-api.md`
+  for the full inventory.
+- **BS2X target requires `unstable`**: the entire `chip-bs21` target is now
+  experimental — no BS2X silicon HIL has run yet.
+- **`embassy` now requires `unstable`**: the `embassy` feature gate alone no longer
+  exposes the embassy module; you need both `embassy` and `unstable` until the
+  integration passes end-to-end HIL.
+- **Typed UART clock**: `Config::clock_hz: Option<u32>` replaced with
+  `Config::clock: UartClock` (`Pll` or `Boot`).
+- **GPIO**: removed no-op `OutputConfig::open_drain` / `with_open_drain`.
+- **I2C**: `addr > 0x7f` now returns `I2cError::InvalidAddress`.
+- **PWM**: `SetDutyCycle` returns `PwmError::DutyOutOfRange` above `max_duty_cycle()`.
 
-### UNSTABLE surfaces (now gated — add `unstable` to restore)
+### Changed
 
-- **Public `dma` module as a whole**: `Dma0`/`Sdma0`, `DmaDriver`, typed channel
-  tokens, mem-to-mem `Transfer`, `DmaTransferSize`/`DmaSyncMask`, peripheral-paced
-  `SpiDma`/`UartDma`, `PeripheralTransfer`, `DmaFrame`/`PeriKind`/`PeriDmaCtl`, and
-  all DMA async hooks. This is conservative: individual HIL tests exist, but safe
-  DMA still has open cache-line ownership/alignment, timeout quiescence, async
-  cancellation, and SPI1/UART DMA evidence gaps.
-- **Interrupt/waker async helpers**: `asynch::block_on`, `IrqSignal`, GPIO `Wait`,
-  timer `AsyncDelay`, UART async I/O, LSADC async. SPI/I2C blocking-backed async
-  trait impls still build with `async` alone.
-- **`embassy`** — no end-to-end HIL (the module is now `unstable`-gated; the
-  `embassy` feature still exists but the module requires `all(embassy, unstable)`).
-- **Other scoped knobs**: `EfuseDriver::set_clock_period`/`read_buffer`/`write_byte`,
-  `System::software_reset*`, `Instant::now`/`elapsed`, interrupt priority/threshold
-  getters/setters, SFC pad config, broad I2S data/FIFO/IRQ methods, broad LSADC and
-  TSENSOR config/data-path methods, TRNG manual clock/divider/status controls.
-- **WS63 untested drivers**: `clock_init`, `km`, `pke`, `safety`, `sfc`, `spacc`,
-  `ulp_gpio`, `rtc`-WS63 (the `hil-rtc` test is opt-in + this board lacks the crystal,
-  so it never ran on connected silicon), `delay` (no HIL).
-- **Entire BS2X target**: `chip-bs21` requires `unstable`, covering shared drivers
-  and BS2X-only modules such as `gadc`, `keyscan`, `pdm`, `qdec`, `usb`, `i2c`-v151,
-  `rtc`-v150, and `trng`-v1 (no BS2X silicon board — QEMU only per ROADMAP).
-- **`prelude`**: `Delay`, `Dma0`/`DmaDriver`/`Sdma0`, `RtcDriver`, `SfcDriver`, and
-  `UlpGpioPin` re-exports are now `unstable`-gated.
+- **hisi-riscv-rt** dependency bumped to `0.5` (runtime adapter architecture release).
+- **docs.rs** now requires `unstable` + nightly for "requires unstable" markers.
 
-### Changed (BREAKING typed config / operational validation)
+### UNSTABLE (gated behind `unstable` feature — add to your `Cargo.toml` to restore)
 
-- **UART**: `Config::clock_hz: Option<u32>` was replaced with typed
-  `Config::clock: UartClock` (`Pll` or `Boot`). Boot-console firmware now writes
-  `Config { clock: UartClock::Boot, .. }` instead of passing a raw clock override.
-- **GPIO**: removed `OutputConfig::open_drain` and `with_open_drain`; the field was a
-  no-op and is not kept as a misleading stable knob.
-- **I2C**: blocking and async operations reject `addr > 0x7f` with
-  `I2cError::InvalidAddress` instead of programming an invalid 7-bit address.
-- **PWM**: `SetDutyCycle` now returns `PwmError::DutyOutOfRange` for duty values above
-  `max_duty_cycle()` instead of claiming `Infallible`.
+- **`dma` module**: `Dma0`/`Sdma0`, `DmaDriver`, typed channel tokens, mem-to-mem
+  `Transfer`, `SpiDma`/`UartDma`. Individual HIL tests exist, but safe-DMA invariants
+  (cache-line, timeout, cancellation) are not yet closed.
+- **Async interrupt/waker helpers**: `asynch::block_on`, `IrqSignal`, GPIO `Wait`,
+  timer `AsyncDelay`, UART async I/O, LSADC async.
+- **Scoped knobs**: `EfuseDriver::set_clock_period`/`read_buffer`/`write_byte`,
+  `System::software_reset*`, `Instant::now`/`elapsed`, interrupt priority/threshold,
+  SFC pad config, broad I2S/LSADC/TSENSOR/TRNG methods.
+- **Drivers without HIL**: `clock_init`, `km`, `pke`, `safety`, `sfc`, `spacc`,
+  `ulp_gpio`, `rtc`-WS63, `delay`.
+- **`prelude`**: `Delay`, `Dma0`/`DmaDriver`/`Sdma0`, `RtcDriver`, `SfcDriver`,
+  `UlpGpioPin`.
 
 ### Fixed
 
-- `dma_mem_to_mem` HIL test: was NOT chip-gated but calls `hal::cache`
-  (chip-ws63-only) → failed to compile on `chip-bs21`. Now `#[cfg(feature="chip-ws63")]`.
-- `uart.rs` UartDma doc comment: the FALSE "write_dma is silicon-verified" claim
-  (it timed out on silicon per `hisi-riscv-hal#5`; no UartDma HIL test exists)
-  was corrected to "UNSTABLE, blocked by #5".
+- `dma_mem_to_mem` HIL test now `#[cfg(feature="chip-ws63")]` (was broken on BS2X).
+- `UartDma` doc comment corrected (write_dma is not silicon-verified).
 
 
 ## [0.5.1] - 2026-06-30
