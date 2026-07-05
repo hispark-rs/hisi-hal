@@ -77,7 +77,7 @@ critical-section = { version = "1", features = ["std"] }
 # (exported as the C symbol `main`, which hisi-riscv-rt's runtime_init calls).
 # Default features = ["semihosting", "panic-handler"] — exactly what the WS63
 # semihosting test-report channel needs (validated on silicon 2026-06-14).
-embedded-test = "0.6.0"
+embedded-test = "0.7"
 # Direct semihosting access for ad-hoc HIL diagnostics (semihosting::println!),
 # same crate embedded-test pulls; `stdio` enables the print macros.
 semihosting = { version = "0.1", features = ["stdio"] }
