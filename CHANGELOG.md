@@ -20,7 +20,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   feature. This hard gate covers the whole BS2X chip target, not just BS2X-only
   drivers, because no BS2X silicon HIL has run yet.
 
-## [0.6.0] - 2026-07-01
 
 ### Changed (BREAKING)
 
@@ -87,6 +86,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `uart.rs` UartDma doc comment: the FALSE "write_dma is silicon-verified" claim
   (it timed out on silicon per `hisi-riscv-hal#5`; no UartDma HIL test exists)
   was corrected to "UNSTABLE, blocked by #5".
+
 
 ## [0.5.1] - 2026-06-30
 
