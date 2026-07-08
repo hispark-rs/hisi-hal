@@ -244,8 +244,7 @@ impl<'d> Uart<'d, Uart2<'d>> {
 fn configure_uart(port: UartPort, config: &Config) {
     let r = uart_regs(port);
 
-    // Enable divider access
-    r.uart_ctl().modify(|_, w| unsafe { w.bits(0) });
+    // Enable divisor-latch access only while programming the baud divider.
     r.uart_ctl().write(|w| w.div_en().set_bit());
 
     // Set baud rate: div = UART_CLK / (16 * baudrate)
@@ -290,13 +289,12 @@ fn configure_uart(port: UartPort, config: &Config) {
     if matches!(config.stop_bits, StopBits::Two) {
         ctl |= 1 << 7;
     }
-    r.uart_ctl().write(|w| unsafe { w.bits(ctl | (1 << 0)) }); // div_en=1
+    r.uart_ctl().write(|w| unsafe { w.bits(ctl) }); // div_en=0: DATA maps back to TX/RX.
 
-    // Enable FIFO
-    r.fifo_ctl().write(|w| unsafe { w.bits(0x01) });
-
-    // Clear FIFO
-    r.fifo_ctl().write(|w| unsafe { w.bits(0x07) });
+    // Reset and enable FIFO with the vendor default trigger levels:
+    // TX interrupt threshold = 2 chars, RX threshold = 1/4 full.
+    r.fifo_ctl().write(|w| w.fifo_en().set_bit().tx_fifo_rst().set_bit().rx_fifo_rst().set_bit());
+    r.fifo_ctl().write(|w| w.fifo_en().set_bit().tx_empty_trig().chars2().rx_empty_trig().quarter());
 }
 
 impl<T: UartInstance> Uart<'_, T> {
