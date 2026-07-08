@@ -216,6 +216,15 @@ fn uart_regs(port: UartPort) -> &'static crate::soc::pac::uart0::RegisterBlock {
     unsafe { &*uart_ptr(port) }
 }
 
+#[allow(dead_code)]
+fn write_fifo_blocking_levels(r: &crate::soc::pac::uart0::RegisterBlock) {
+    r.fifo_ctl().write(|w| w.fifo_en().set_bit().tx_empty_trig().empty().rx_empty_trig().char1());
+}
+
+fn write_fifo_dma_levels(r: &crate::soc::pac::uart0::RegisterBlock) {
+    r.fifo_ctl().write(|w| w.fifo_en().set_bit().tx_empty_trig().chars2().rx_empty_trig().quarter());
+}
+
 impl<'d> Uart<'d, Uart0<'d>> {
     /// Create and configure a UART0 driver from the peripheral token and config.
     pub fn new_uart0(_uart: Uart0<'d>, config: Config) -> Self {
@@ -294,7 +303,7 @@ fn configure_uart(port: UartPort, config: &Config) {
     // Reset and enable FIFO with the vendor default trigger levels:
     // TX interrupt threshold = 2 chars, RX threshold = 1/4 full.
     r.fifo_ctl().write(|w| w.fifo_en().set_bit().tx_fifo_rst().set_bit().rx_fifo_rst().set_bit());
-    r.fifo_ctl().write(|w| w.fifo_en().set_bit().tx_empty_trig().chars2().rx_empty_trig().quarter());
+    write_fifo_dma_levels(r);
 }
 
 impl<T: UartInstance> Uart<'_, T> {
@@ -440,7 +449,7 @@ impl<'d, T> UartDma<'d, T> {
         // FIFO_CTL trigger levels (vendor defaults hal_uart_v151.c:127/133):
         // TX = 2-chars-empty, RX = 1/4. Written as the LAST FIFO_CTL write (the
         // register is WO; a later FIFO reset would clobber pacing). fifo_en stays set.
-        r.fifo_ctl().modify(|_, w| w.fifo_en().set_bit().tx_empty_trig().chars2().rx_empty_trig().quarter());
+        write_fifo_dma_levels(r);
 
         // Clean the TX source (non-coherent core). The DATA register is uncached MMIO.
         unsafe { crate::cache::clean_range(ptr as usize, bytes) };
@@ -455,7 +464,7 @@ impl<'d, T> UartDma<'d, T> {
         while self.dma.channel_enabled_raw(chn) {
             n -= 1;
             if n == 0 {
-                r.fifo_ctl().modify(|_, w| w.tx_empty_trig().empty().rx_empty_trig().char1());
+                write_fifo_blocking_levels(r);
                 self.dma.halt_channel_raw(chn);
                 self.dma.disable_channel_raw(chn);
                 return Err(UartDmaError::Timeout);
@@ -463,7 +472,7 @@ impl<'d, T> UartDma<'d, T> {
             core::hint::spin_loop();
         }
         // Restore the blocking trigger levels (DMA no longer pacing).
-        r.fifo_ctl().modify(|_, w| w.tx_empty_trig().empty().rx_empty_trig().char1());
+        write_fifo_blocking_levels(r);
         Ok(buf)
     }
 
@@ -488,7 +497,7 @@ impl<'d, T> UartDma<'d, T> {
         let bytes = beats;
         let data_addr = self.data_addr();
 
-        r.fifo_ctl().modify(|_, w| w.fifo_en().set_bit().tx_empty_trig().chars2().rx_empty_trig().quarter());
+        write_fifo_dma_levels(r);
 
         let cfg = DmaChannelConfig::default().peripheral_to_mem(self.rx_peri()).with_width(DmaFrame::Byte);
         let chn = ch.logical();
@@ -498,7 +507,7 @@ impl<'d, T> UartDma<'d, T> {
         while self.dma.channel_enabled_raw(chn) {
             n -= 1;
             if n == 0 {
-                r.fifo_ctl().modify(|_, w| w.tx_empty_trig().empty().rx_empty_trig().char1());
+                write_fifo_blocking_levels(r);
                 self.dma.halt_channel_raw(chn);
                 self.dma.disable_channel_raw(chn);
                 return Err(UartDmaError::Timeout);
@@ -507,7 +516,7 @@ impl<'d, T> UartDma<'d, T> {
         }
         // Invalidate the RX destination so the CPU re-reads what DMA wrote.
         unsafe { crate::cache::invalidate_range(ptr as usize, bytes) };
-        r.fifo_ctl().modify(|_, w| w.tx_empty_trig().empty().rx_empty_trig().char1());
+        write_fifo_blocking_levels(r);
         Ok(buf)
     }
 
@@ -516,7 +525,7 @@ impl<'d, T> UartDma<'d, T> {
     #[instability::unstable]
     pub fn release(self) -> (Uart<'d, T>, crate::dma::DmaDriver<'d, crate::dma::Dma0>) {
         let r = self.regs();
-        r.fifo_ctl().modify(|_, w| w.tx_empty_trig().empty().rx_empty_trig().char1());
+        write_fifo_blocking_levels(r);
         (Uart { _peripheral: PhantomData }, self.dma)
     }
 }
@@ -673,14 +682,6 @@ mod asynch_impl {
     static UART_RX: [IrqSignal; 3] = [IrqSignal::new(), IrqSignal::new(), IrqSignal::new()];
     static UART_BYTE: [Mutex<Cell<u8>>; 3] = [const { Mutex::new(Cell::new(0)) }; 3];
 
-    fn uart_base(port: UartPort) -> usize {
-        match port {
-            UartPort::Uart0 => 0x4401_0000,
-            UartPort::Uart1 => 0x4401_1000,
-            UartPort::Uart2 => 0x4401_2000,
-        }
-    }
-
     /// UART trap hook: read the received byte (which de-asserts the RX IRQ) and
     /// wake the awaiting reader. Call from the trap when `mcause` is UART0..2_INT
     /// (IRQ 53..55). Reading in the ISR avoids a level-triggered RX storm.
@@ -734,8 +735,8 @@ mod asynch_impl {
             return r.data().read().bits() as u8; // byte already waiting
         }
         UART_RX[idx].reset();
-        // Enable the UART RX interrupt (INTR_EN @ +0x18) so a byte raises the IRQ.
-        unsafe { core::ptr::write_volatile((uart_base(port) + 0x18) as *mut u32, 1) };
+        // Enable the UART RX-data interrupt so a byte raises the IRQ.
+        r.intr_en().modify(|_, w| w.rece_data_intr_en().set_bit());
         let _ = uart; // keep the &Uart borrow for the await's lifetime
         RxFuture { port }.await;
         critical_section::with(|cs| UART_BYTE[idx].borrow(cs).get())

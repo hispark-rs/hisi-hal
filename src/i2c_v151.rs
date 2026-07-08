@@ -132,12 +132,12 @@ fn configure(idx: u8, speed: Speed) {
         });
         match speed {
             Speed::Standard => {
-                r.ic_ss_scl_hcnt().write(|w| w.cnt().bits(hcnt as u16));
-                r.ic_ss_scl_lcnt().write(|w| w.cnt().bits(lcnt as u16));
+                r.ic_ss_scl_hcnt().write(|w| w.ic_ss_scl_hcnt().bits(hcnt as u16));
+                r.ic_ss_scl_lcnt().write(|w| w.ic_ss_scl_lcnt().bits(lcnt as u16));
             }
             Speed::Fast => {
-                r.ic_fs_scl_hcnt().write(|w| w.cnt().bits(hcnt as u16));
-                r.ic_fs_scl_lcnt().write(|w| w.cnt().bits(lcnt as u16));
+                r.ic_fs_scl_hcnt().write(|w| w.ic_fs_scl_hcnt().bits(hcnt as u16));
+                r.ic_fs_scl_lcnt().write(|w| w.ic_fs_scl_lcnt().bits(lcnt as u16));
             }
         }
         r.ic_rx_tl().write(|w| w.rx_tl().bits(0));

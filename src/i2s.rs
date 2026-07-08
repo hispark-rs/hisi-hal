@@ -512,21 +512,10 @@ impl<'d, R: sealed::Role> I2sDriver<'d, R> {
 /// `chip-ws63`; on BS2X this is a no-op (their SIO clock tree differs).
 #[cfg(feature = "chip-ws63")]
 fn enable_i2s_clock() {
-    // SAFETY: fixed 32-bit CMU/CLDO_CRG MMIO addresses; RMW of clock-enable bits.
-    unsafe {
-        const CMU_NEW_CFG0: usize = 0x4000_34A0;
-        const CLDO_CRG_CKEN_CTL0: usize = 0x4400_1100;
-        const CMU_DIV_AD_RSTN_SYNC_BIT: u32 = 0;
-        const I2S_BUS_CKEN_BIT: u32 = 11;
-        const I2S_CKEN_BIT: u32 = 12;
-        let set_bit = |addr: usize, bit: u32| {
-            let v = core::ptr::read_volatile(addr as *const u32);
-            core::ptr::write_volatile(addr as *mut u32, v | (1 << bit));
-        };
-        set_bit(CMU_NEW_CFG0, CMU_DIV_AD_RSTN_SYNC_BIT);
-        set_bit(CLDO_CRG_CKEN_CTL0, I2S_CKEN_BIT);
-        set_bit(CLDO_CRG_CKEN_CTL0, I2S_BUS_CKEN_BIT);
-    }
+    let cmu = unsafe { &*crate::soc::pac::Cmu::ptr() };
+    let cldo = unsafe { &*crate::peripherals::CldoCrg::ptr() };
+    cmu.cmu_new_cfg0().modify(|_, w| w.cmu_div_ad_rstn_sync().set_bit());
+    cldo.cken_ctl0().modify(|_, w| w.i2s_cken().set_bit().i2s_bus_cken().set_bit());
 }
 
 #[cfg(not(feature = "chip-ws63"))]

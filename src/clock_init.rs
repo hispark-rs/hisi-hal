@@ -50,7 +50,7 @@
 //!
 //! | Register | Address | Description |
 //! |----------|---------|-------------|
-//! | HW_CTL | 0x4000_0014 | TCXO frequency detect (bit[0]: 0=24MHz, 1=40MHz) |
+//! | HW_CTL | 0x4000_0014 | TCXO frequency detect (bit[0]: 0=40MHz, 1=24MHz) |
 //! | REG_EXCEP_RO_RG | 0x4000_319C | PLL lock status (bit 12) |
 //! | CMU_NEW_CFG1 | 0x4000_34A4 | Flash clock control |
 //! | CLDO_CRG_CLK_SEL | 0x4400_1134 | Clock source select |
@@ -75,17 +75,17 @@
 use crate::peripherals::{CldoCrg, SysCtl0};
 use crate::soc::chip::SYSTEM_CLOCK_HZ;
 
-// ── Register addresses (from fbb_ws63 soc_porting.c / pm_porting.c) ──
+fn sys_ctl0_regs() -> &'static crate::soc::pac::sys_ctl0::RegisterBlock {
+    unsafe { &*SysCtl0::ptr() }
+}
 
-/// Hardware control register — TCXO frequency detect.
-const HW_CTL: *mut u32 = 0x4000_0014 as *mut u32;
-/// Exception RO register — PLL lock status (bit 12).
-const REG_EXCEP_RO_RG: *mut u32 = 0x4000_319C as *mut u32;
-/// CMU PLL signal register — PLL power-down control (bit 15).
-#[allow(dead_code)]
-const REG_CMU_FNPLL_SIG: *mut u32 = 0x4000_342C as *mut u32;
-/// Flash clock control register.
-const CMU_NEW_CFG1: *mut u32 = 0x4000_34A4 as *mut u32;
+fn cmu_regs() -> &'static crate::soc::pac::cmu::RegisterBlock {
+    unsafe { &*crate::soc::pac::Cmu::ptr() }
+}
+
+fn cldo_crg_regs() -> &'static crate::soc::pac::cldo_crg::RegisterBlock {
+    unsafe { &*CldoCrg::ptr() }
+}
 
 // ── TCXO frequency ────────────────────────────────────────────────
 
@@ -101,9 +101,11 @@ pub enum TcxoFreq {
 impl TcxoFreq {
     /// Detect the TCXO frequency by reading the HW_CTL register.
     pub fn detect() -> Self {
-        // SAFETY: HW_CTL (0x4000_0014) is a valid physical MMIO register per fbb_ws63
-        let hw_ctl = unsafe { HW_CTL.read_volatile() };
-        if hw_ctl & 0x01 == 0 { TcxoFreq::MHz24 } else { TcxoFreq::MHz40 }
+        if sys_ctl0_regs().hw_ctl().read().refclk_freq_status().bit_is_clear() {
+            TcxoFreq::MHz40
+        } else {
+            TcxoFreq::MHz24
+        }
     }
 
     /// Return the frequency in Hz.
@@ -126,7 +128,7 @@ pub enum PllStatus {
 /// Check if the PLL is locked by reading REG_EXCEP_RO_RG bit 12.
 fn pll_is_locked() -> bool {
     // fbb_ws63: cmu_is_fnpll_locked() reads REG_EXCEP_RO_RG bit 12
-    (unsafe { REG_EXCEP_RO_RG.read_volatile() } >> 12) & 1 == 1
+    cmu_regs().excep_ro_rg().read().fnpll_lock_grm().bit_is_set()
 }
 
 /// Poll the PLL lock status with retries.
@@ -196,47 +198,32 @@ impl SystemClocks {
 /// before any peripheral drivers are initialized.
 pub fn init_clocks(_sys_ctl0: &SysCtl0<'_>, _cldo_crg: &CldoCrg<'_>) -> SystemClocks {
     let tcxo_freq = TcxoFreq::detect();
-    let clk_sel_ptr = 0x4400_1134 as *mut u32;
-    let clk_gate_ptr = 0x4400_1104 as *mut u32; // CLDO_SUB_CRG_CKEN_CTL1
+    let cmu = cmu_regs();
+    let cldo = cldo_crg_regs();
 
     // ── Step 1: Switch flash clock to PLL ────────────────────
     // (fbb_ws63: switch_flash_clock_to_pll in soc_porting.c)
-    // SAFETY: CMU_NEW_CFG1 (0x4000_34A4), CLDO_CRG_CLK_SEL (0x4400_1134)
-    // are valid physical MMIO addresses per fbb_ws63 register map.
-    unsafe { CMU_NEW_CFG1.write_volatile(0x1) }; // CPU_DIV_FLASH_RSTN_SYNC
+    cmu.cmu_new_cfg1().write(|w| w.cpu_div_flash_rstn_sync().set_bit());
     for _ in 0..tcxo_freq.hz() / 1_000_000 / 3 {
         core::hint::spin_loop(); // delay 1µs
     }
-    unsafe { CMU_NEW_CFG1.write_volatile(0x3) }; // CPU_DIV_FLASH_RSTN
-    unsafe {
-        let val = clk_sel_ptr.read_volatile();
-        clk_sel_ptr.write_volatile(val | (1 << 18)); // bit 18: flash → PLL
-    }
+    cmu.cmu_new_cfg1().write(|w| w.cpu_div_flash_rstn_sync().set_bit().cpu_div_flash_rstn().set_bit());
+    cldo.clk_sel().modify(|_, w| w.flash_clk_sel().set_bit());
 
     // ── Step 2: Switch UART clocks to PLL ───────────────────
     // (fbb_ws63: switch_clock in clock_init.c)
-    unsafe {
-        // Disable UART clock gates (bits 18,19,20 in CLDO_SUB_CRG_CKEN_CTL1)
-        let mut gate = clk_gate_ptr.read_volatile();
-        gate &= !((1 << 18) | (1 << 19) | (1 << 20));
-        clk_gate_ptr.write_volatile(gate);
+    // Disable UART clock gates (bits 18,19,20 in CLDO_SUB_CRG_CKEN_CTL1).
+    cldo.cken_ctl1().modify(|_, w| unsafe { w.uart_cken().bits(0) });
 
-        // Set CLDO_CRG_CLK_SEL bits 1,2,3: UART0/1/2 → PLL
-        let mut sel = clk_sel_ptr.read_volatile();
-        sel |= (1 << 1) | (1 << 2) | (1 << 3);
-        clk_sel_ptr.write_volatile(sel);
+    // Set CLDO_CRG_CLK_SEL bits 1,2,3: UART0/1/2 → PLL.
+    cldo.clk_sel().modify(|_, w| w.uart0_clk_sel().set_bit().uart1_clk_sel().set_bit().uart2_clk_sel().set_bit());
 
-        // Re-enable UART clock gates
-        gate |= (1 << 18) | (1 << 19) | (1 << 20);
-        clk_gate_ptr.write_volatile(gate);
-    }
+    // Re-enable UART clock gates.
+    cldo.cken_ctl1().modify(|_, w| unsafe { w.uart_cken().bits(0b111) });
 
     // ── Step 3: Switch SPI clock to PLL ─────────────────────
     // (fbb_ws63: spi_porting.c sets CLDO_CRG_CLK_SEL bit 6)
-    unsafe {
-        let val = clk_sel_ptr.read_volatile();
-        clk_sel_ptr.write_volatile(val | (1 << 6)); // bit 6: SPI → PLL
-    }
+    cldo.clk_sel().modify(|_, w| w.spi_clk_sel().set_bit());
 
     // ── Step 4: Verify PLL lock ─────────────────────────────
     let pll_locked = match wait_pll_lock(30, 1000) {

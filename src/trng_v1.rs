@@ -53,7 +53,7 @@ impl<'d> Trng<'d> {
         let r = self.regs();
         for _ in 0..POLL_LIMIT {
             let rdy = r.trng_fifo_ready().read();
-            if rdy.trng_data_ready().bit_is_set() && rdy.trng_done().bit_is_set() {
+            if rdy.trng_ready().bit_is_set() && rdy.trng_done().bit_is_set() {
                 return Ok(r.trng_fifo_data().read().trng_data().bits());
             }
             core::hint::spin_loop();

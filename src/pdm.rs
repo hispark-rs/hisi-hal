@@ -5,18 +5,13 @@
 //! that queue in the UP FIFO. The FIFO is a fixed (non-incrementing) MMIO data
 //! window at `0x5208_E080` — the vendor drains it by DMA, but it is also directly
 //! CPU-readable, gated on the UP-FIFO status (`up_fifo_st` @ 0x30, bit2 = empty).
-//! Neither the status register nor the data window is in bs2x-pac's `pdm` block
-//! (which only covers the config registers ≤0x2c), so this driver reaches them via
-//! raw addresses (BS2X-correct). Register map + sequence from fbb_bs2x
-//! `hal_pdm_v150`; bs2x-pac `Pdm` @ 0x5208_e000.
+//! Register map + sequence from fbb_bs2x `hal_pdm_v150`; bs2x-pac `Pdm`
+//! @ 0x5208_e000 models the config registers, status register, and FIFO data
+//! window.
 
 use crate::peripherals::Pdm as PdmPeriph;
 use core::marker::PhantomData;
 
-const PDM_BASE: usize = 0x5208_E000;
-const PDM_UP_FIFO_ST: usize = PDM_BASE + 0x30; // bit2 = up_fifo_empty
-const PDM_FIFO_DATA: usize = PDM_BASE + 0x80; // 32-bit PCM sample window
-const UP_FIFO_EMPTY: u32 = 1 << 2;
 const POLL_LIMIT: u32 = 1_000_000;
 
 /// PDM-microphone audio front-end driver (BS2X IP v150): decimates the DMIC PDM
@@ -72,19 +67,19 @@ impl<'d> Pdm<'d> {
     /// number of samples actually captured (fewer than `buf.len()` only on
     /// timeout).
     pub fn capture(&self, buf: &mut [u32]) -> usize {
+        let r = self.regs();
         let mut n = 0;
         for slot in buf.iter_mut() {
             // Wait for the FIFO to be non-empty.
             let mut spins = 0;
-            // SAFETY: fixed BS2X PDM status/data MMIO addresses.
-            while unsafe { core::ptr::read_volatile(PDM_UP_FIFO_ST as *const u32) } & UP_FIFO_EMPTY != 0 {
+            while r.up_fifo_st().read().up_fifo_empty_int().bit_is_set() {
                 spins += 1;
                 if spins > POLL_LIMIT {
                     return n;
                 }
                 core::hint::spin_loop();
             }
-            *slot = unsafe { core::ptr::read_volatile(PDM_FIFO_DATA as *const u32) };
+            *slot = r.up_fifo_data().read().pcm_word().bits();
             n += 1;
         }
         n

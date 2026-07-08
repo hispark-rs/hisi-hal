@@ -44,15 +44,14 @@ pub trait DmaInstance: sealed::DmaInstanceSealed {
     /// physical channels 0-3 — see the module-level "Channel addressing" docs.
     const CHANNEL_BASE: u8;
 
-    /// Auto clock-gate **bypass** `(register, mask)` for this controller, if any.
+    /// Bypass auto clock-gating for this controller, if needed.
     ///
     /// The WS63 M_DMA clock is auto-gated when the controller is idle; the
     /// primary controller must set this bit so its clock keeps running across a
     /// transfer, otherwise a started transfer never advances (its done bit never
     /// sets). Mirrors the vendor `dma_port_register_irq()` "BYPASS dma自动门控"
-    /// (`DMA_CLK_AUTO_CTRL_REG |= DMA_CLK_ON_MASK`). `None` = no ungate
-    /// needed/available — the secure SDMA is never provisioned on WS63.
-    const CLK_AUTO_CTRL: Option<(usize, u32)> = None;
+    /// (`DMA_CLK_AUTO_CTRL_REG |= DMA_CLK_ON_MASK`).
+    fn bypass_auto_clock_gate() {}
 }
 
 /// Marker type for the primary DMA controller (logical channels 0-3).
@@ -63,9 +62,13 @@ impl DmaInstance for Dma0 {
         Dma::ptr()
     }
     const CHANNEL_BASE: u8 = 0;
-    // Bypass the M_DMA auto clock-gate (DMA_CLK_AUTO_CTRL_REG bit 19) so the
-    // primary controller's clock stays on across a transfer (vendor dma_porting).
-    const CLK_AUTO_CTRL: Option<(usize, u32)> = Some((0x4400_0244, 0x0008_0000));
+    fn bypass_auto_clock_gate() {
+        #[cfg(feature = "chip-ws63")]
+        {
+            let r = unsafe { &*crate::peripherals::SysCtl1::ptr() };
+            r.ip_auto_cg_bypass().modify(|_, w| w.dma_clk_on().set_bit());
+        }
+    }
 }
 
 /// Marker type for the secure DMA controller (logical channels 8-11).
@@ -310,14 +313,7 @@ impl<'d, T: DmaInstance> DmaDriver<'d, T> {
     /// sets); this was why `dma_mem_to_mem` failed on silicon while passing under
     /// QEMU, which models no clock gating. Mirrors the vendor `dma_porting`.
     pub fn enable_controller(&mut self) {
-        if let Some((reg, mask)) = T::CLK_AUTO_CTRL {
-            // SAFETY: fixed glue MMIO register; read-modify-write sets only the
-            // clock-on bit, preserving the rest. Not exposed by the PAC.
-            unsafe {
-                let p = reg as *mut u32;
-                p.write_volatile(p.read_volatile() | mask);
-            }
-        }
+        T::bypass_auto_clock_gate();
         let r = Self::regs();
         unsafe {
             r.dmac_config().write(|w| w.bits(0x01));
@@ -966,34 +962,34 @@ impl PeriDmaCtl {
     /// the teardown *order* is exercised by the `cancel_then_quiesce` host test.
     #[cfg(target_arch = "riscv32")]
     fn disable(&mut self) {
-        // SAFETY: `base` is a physical MMIO register block; read-modify-write clears
-        // only the DMA-enable bit(s), preserving the rest. Mirrors the vendor disable.
-        unsafe {
-            match self.kind {
-                PeriKind::Spi => {
-                    // spi_dcr @ base+0x18: tdmae bit0 / rdmae bit1.
-                    let p = (self.base + 0x18) as *mut u32;
-                    let mut v = p.read_volatile();
+        match self.kind {
+            PeriKind::Spi => {
+                if let Some(r) = spi_regs_from_base(self.base) {
                     match self.dir {
-                        DmaDirection::Tx => v &= !0b01,
-                        DmaDirection::Rx => v &= !0b10,
-                    }
-                    p.write_volatile(v);
-                }
-                PeriKind::Uart => {
-                    // uart_parameter @ base+0x60 bit11 (dma_mode). Writing 0 is a no-op
-                    // if the field is truly RO (the DW UART paces on FIFO triggers
-                    // alone — open question, resolved on silicon in P3).
-                    let p = (self.base + 0x60) as *mut u32;
-                    let v = p.read_volatile() & !(1 << 11);
-                    p.write_volatile(v);
+                        DmaDirection::Tx => r.spi_dcr().modify(|_, w| w.tdmae().clear_bit()),
+                        DmaDirection::Rx => r.spi_dcr().modify(|_, w| w.rdmae().clear_bit()),
+                    };
                 }
             }
+            // UART DMA is paced by FIFO_CTL trigger levels; UART_PARAMETER.dma_mode is
+            // read-only in the PAC, so there is no peripheral DMA-enable bit to clear.
+            PeriKind::Uart => {}
         }
     }
 
     #[cfg(not(target_arch = "riscv32"))]
     fn disable(&mut self) {}
+}
+
+#[cfg(all(feature = "chip-ws63", target_arch = "riscv32"))]
+fn spi_regs_from_base(base: usize) -> Option<&'static crate::soc::pac::spi0::RegisterBlock> {
+    if base == crate::peripherals::Spi0::ptr() as usize {
+        Some(unsafe { &*crate::peripherals::Spi0::ptr() })
+    } else if base == crate::peripherals::Spi1::ptr() as usize {
+        Some(unsafe { &*crate::peripherals::Spi1::ptr() })
+    } else {
+        None
+    }
 }
 
 // ── Typed DMA channel tokens (runtime-claimed) ───────────────────────────────

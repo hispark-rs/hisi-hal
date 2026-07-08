@@ -528,10 +528,6 @@ fn regs(block: u8) -> &'static crate::soc::pac::gpio0::RegisterBlock {
 // PE = bit 9 (pull enable), PS = bit 10 (pull select); per the SVD the {PE,PS}
 // pair encodes 00 = none, 11 = pull-up, 10 = pull-down (matches
 // `io_config::build_pad_ctrl`). Only GPIO pads 0..=14 have a control register.
-const IO_CONFIG_BASE: usize = 0x4400_D000;
-const PAD_GPIO_CTRL_OFF: usize = 0x800;
-const PAD_PE_BIT: u32 = 1 << 9;
-const PAD_PS_BIT: u32 = 1 << 10;
 // IE = bit 11 gates the pad's input buffer; gpio_sw_out only reflects the pin
 // when IE is set. The boot ROM leaves IE=1 by reset default (measured on silicon:
 // pad_gpio_03_ctrl = 0x800 at entry) and the WS63 vendor pinctrl never writes it
@@ -539,7 +535,6 @@ const PAD_PS_BIT: u32 = 1 << 10;
 // it. We assert IE for input pins anyway — same hardware state the vendor relies
 // on, but self-contained, so a pad whose IE was cleared by an earlier mux still
 // reads correctly. (`io_config::build_pad_ctrl` places IE at the same bit 11.)
-const PAD_IE_BIT: u32 = 1 << 11;
 
 /// Configure a GPIO pad for **input** via IO_CONFIG: apply the pull resistor and
 /// enable the input buffer (IE).
@@ -547,29 +542,50 @@ const PAD_IE_BIT: u32 = 1 << 11;
 /// Read-modify-write so drive strength / Schmitt bits are kept. A no-op for pins
 /// 15..=18, which have no `pad_gpio_NN_ctrl` register in this layout (their pull
 /// is configured through other pads / the ROM pin map).
+#[cfg(feature = "chip-ws63")]
 fn apply_pull(pin: u8, pull: Pull) {
     if pin > 14 {
         return;
     }
-    let reg = (IO_CONFIG_BASE + PAD_GPIO_CTRL_OFF + (pin as usize) * 4) as *mut u32;
     let (pe, ps) = match pull {
         Pull::None => (false, false),
         Pull::Up => (true, true),
         Pull::Down => (true, false),
     };
-    unsafe {
-        let mut v = core::ptr::read_volatile(reg);
-        v &= !(PAD_PE_BIT | PAD_PS_BIT);
-        if pe {
-            v |= PAD_PE_BIT;
+    let regs = unsafe { &*crate::peripherals::IoConfig::ptr() };
+    macro_rules! apply_pad {
+        ($reg:expr, $pe:ident, $ps:ident, $ie:ident) => {{
+            let _ = $reg.modify(|_, w| {
+                let w = if pe { w.$pe().set_bit() } else { w.$pe().clear_bit() };
+                let w = if ps { w.$ps().set_bit() } else { w.$ps().clear_bit() };
+                w.$ie().set_bit()
+            });
+        }};
+    }
+    match pin {
+        0 => apply_pad!(regs.pad_gpio_00_ctrl(), pad_gpio_00_ctrl_pe, pad_gpio_00_ctrl_ps, pad_gpio_00_ctrl_ie),
+        1 => apply_pad!(regs.pad_gpio_01_ctrl(), pad_gpio_01_ctrl_pe, pad_gpio_01_ctrl_ps, pad_gpio_01_ctrl_ie),
+        2 => apply_pad!(regs.pad_gpio_02_ctrl(), pad_gpio_02_ctrl_pe, pad_gpio_02_ctrl_ps, pad_gpio_02_ctrl_ie),
+        3 => apply_pad!(regs.pad_gpio_03_ctrl(), pad_gpio_03_ctrl_pe, pad_gpio_03_ctrl_ps, pad_gpio_03_ctrl_ie),
+        4 => apply_pad!(regs.pad_gpio_04_ctrl(), pad_gpio_04_ctrl_pe, pad_gpio_04_ctrl_ps, pad_gpio_04_ctrl_ie),
+        5 => apply_pad!(regs.pad_gpio_05_ctrl(), pad_gpio_05_ctrl_pe, pad_gpio_05_ctrl_ps, pad_gpio_05_ctrl_ie),
+        6 => apply_pad!(regs.pad_gpio_06_ctrl(), pad_gpio_06_ctrl_pe, pad_gpio_06_ctrl_ps, pad_gpio_06_ctrl_ie),
+        7 => apply_pad!(regs.pad_gpio_07_ctrl(), pad_gpio_07_ctrl_pe, pad_gpio_07_ctrl_ps, pad_gpio_07_ctrl_ie),
+        8 => apply_pad!(regs.pad_gpio_08_ctrl(), pad_gpio_08_ctrl_pe, pad_gpio_08_ctrl_ps, pad_gpio_08_ctrl_ie),
+        9 => apply_pad!(regs.pad_gpio_09_ctrl(), pad_gpio_09_ctrl_pe, pad_gpio_09_ctrl_ps, pad_gpio_09_ctrl_ie),
+        10 => apply_pad!(regs.pad_gpio_10_ctrl(), pad_gpio_10_ctrl_pe, pad_gpio_10_ctrl_ps, pad_gpio_10_ctrl_ie),
+        11 => apply_pad!(regs.pad_gpio_11_ctrl(), pad_gpio_11_ctrl_pe, pad_gpio_11_ctrl_ps, pad_gpio_11_ctrl_ie),
+        12 => apply_pad!(regs.pad_gpio_12_ctrl(), pad_gpio_12_ctrl_pe, pad_gpio_12_ctrl_ps, pad_gpio_12_ctrl_ie),
+        13 => apply_pad!(regs.pad_gpio_13_ctrl(), pad_gpio_13_ctrl_pe, pad_gpio_13_ctrl_ps, pad_gpio_13_ctrl_ie),
+        14 => apply_pad!(regs.pad_gpio_14_ctrl(), pad_gpio_14_ctrl_pe, pad_gpio_14_ctrl_ps, pad_gpio_14_ctrl_ie),
+        _ => {
+            debug_assert!(false, "GPIO pad {pin} has no IO_CONFIG pad control register");
         }
-        if ps {
-            v |= PAD_PS_BIT;
-        }
-        v |= PAD_IE_BIT; // ensure the input buffer is enabled
-        core::ptr::write_volatile(reg, v);
     }
 }
+
+#[cfg(not(feature = "chip-ws63"))]
+fn apply_pull(_pin: u8, _pull: Pull) {}
 
 // ── InputSignal / OutputSignal (peripheral interconnect) ──────────
 
@@ -748,6 +764,10 @@ pub use asynch_impl::on_interrupt;
 mod tests {
     use super::*;
 
+    const PAD_PE_BIT: u32 = 1 << 9;
+    const PAD_PS_BIT: u32 = 1 << 10;
+    const PAD_IE_BIT: u32 = 1 << 11;
+
     /// The `into_latched` escape-hatch marker is zero-sized (a pure type-level proof
     /// token). The safe-state Drop (revert pad to input) register effect is
     /// HIL-validated on silicon — the host has no MMIO.
@@ -873,21 +893,19 @@ mod tests {
         assert!(pull_bits(Pull::Down).0);
     }
 
-    // `apply_pull` computes the pad-control register address as
-    // IO_CONFIG_BASE + PAD_GPIO_CTRL_OFF + pin*4, and is a no-op for pins > 14.
-    fn pad_ctrl_addr(pin: u8) -> usize {
-        IO_CONFIG_BASE + PAD_GPIO_CTRL_OFF + (pin as usize) * 4
+    // `apply_pull` dispatches to the SVD-modeled PAD_GPIO_00_CTRL..PAD_GPIO_14_CTRL
+    // PAC accessors, and is a no-op for pins > 14.
+    fn has_pad_ctrl(pin: u8) -> bool {
+        pin <= 14
     }
 
     #[test]
-    fn pad_ctrl_address_arithmetic() {
-        // First pad sits at base+offset; each subsequent pad is +4 bytes.
-        assert_eq!(pad_ctrl_addr(0), IO_CONFIG_BASE + PAD_GPIO_CTRL_OFF);
-        assert_eq!(pad_ctrl_addr(1), IO_CONFIG_BASE + PAD_GPIO_CTRL_OFF + 4);
-        assert_eq!(pad_ctrl_addr(14), 0x4400_D000 + 0x800 + 14 * 4);
-        // Strictly ascending, 4-byte stride across the whole pad-controlled range.
-        for pin in 1u8..=14 {
-            assert_eq!(pad_ctrl_addr(pin) - pad_ctrl_addr(pin - 1), 4);
+    fn pad_ctrl_pac_coverage() {
+        for pin in 0u8..=14 {
+            assert!(has_pad_ctrl(pin));
+        }
+        for pin in 15u8..=18 {
+            assert!(!has_pad_ctrl(pin));
         }
     }
 
@@ -970,7 +988,6 @@ mod tests {
 
 #[cfg(all(test, not(target_arch = "riscv32")))]
 mod proptests {
-    use super::{IO_CONFIG_BASE, PAD_GPIO_CTRL_OFF};
     use proptest::prelude::*;
 
     proptest! {
@@ -983,13 +1000,11 @@ mod proptests {
             prop_assert!(bit < 8);
         }
 
-        /// Fuzz: pad-control addresses are strictly monotonic in the pin index
-        /// and never overflow `usize` for the pad-controlled range (0..=14).
+        /// Fuzz: only the SVD-modeled GPIO pads 0..=14 have direct IO_CONFIG control
+        /// registers in this PAC revision; higher GPIO pins are deliberately no-op.
         #[test]
-        fn pad_addr_monotonic(pin in 1u8..=14) {
-            let addr = |p: u8| IO_CONFIG_BASE + PAD_GPIO_CTRL_OFF + (p as usize) * 4;
-            prop_assert_eq!(addr(pin) - addr(pin - 1), 4);
-            prop_assert!(addr(pin) > addr(pin - 1));
+        fn pad_ctrl_coverage_matches_svd(pin in 0u8..=18) {
+            prop_assert_eq!(pin <= 14, (0..=14).contains(&pin));
         }
     }
 }

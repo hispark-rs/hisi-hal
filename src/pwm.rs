@@ -120,31 +120,17 @@ impl PwmPeriod {
 fn enable_pwm_clock() {
     #[cfg(feature = "chip-ws63")]
     {
-        const CLDO_CRG_CKEN_CTL0: usize = 0x4400_1100;
-        const CLDO_CRG_DIV_CTL3: usize = 0x4400_1114;
-        const CLDO_CRG_CLK_SEL: usize = 0x4400_1134;
-        const PWM_CKSEL_BIT: u32 = 7; // high-frequency source select
-        const PWM_BUS_CKEN: u32 = 2; // base of the 9-bit [10:2] bus+channel CKEN field
-        const PWM_CKEN_FIELD: u32 = 0x1FF; // all 9 clock-enable bits
-        const PWM0_DIV1_CFG: u32 = 16; // DIV_CTL3 [19:16] = PWM0 divider
-        const PWM0_LOAD_DIV_EN: u32 = 20; // DIV_CTL3 bit 20 = latch the divider
-        const PWM_DIV_6: u32 = 6; // CONFIG_HIGH_FREQUENCY default divider
+        const PWM_CKEN_FIELD: u16 = 0x1FF; // all 9 clock-enable bits
+        const PWM_DIV_6: u8 = 6; // CONFIG_HIGH_FREQUENCY default divider
 
-        // SAFETY: fixed 32-bit CLDO_CRG MMIO addresses; RMW of clock bits is benign.
-        unsafe fn rmw(addr: usize, clear: u32, set: u32) {
-            let p = addr as *mut u32;
-            let v = (unsafe { core::ptr::read_volatile(p) } & !clear) | set;
-            unsafe { core::ptr::write_volatile(p, v) };
-        }
-        unsafe {
-            rmw(CLDO_CRG_CLK_SEL, 0, 1 << PWM_CKSEL_BIT);
-            rmw(CLDO_CRG_CKEN_CTL0, 0, PWM_CKEN_FIELD << PWM_BUS_CKEN);
-            // Reload the PWM0 divider: clear LOAD_DIV_EN, set the 4-bit divider,
-            // then set LOAD_DIV_EN (the rising edge latches it).
-            rmw(CLDO_CRG_DIV_CTL3, 1 << PWM0_LOAD_DIV_EN, 0);
-            rmw(CLDO_CRG_DIV_CTL3, 0xF << PWM0_DIV1_CFG, PWM_DIV_6 << PWM0_DIV1_CFG);
-            rmw(CLDO_CRG_DIV_CTL3, 0, 1 << PWM0_LOAD_DIV_EN);
-        }
+        let cldo = unsafe { &*crate::peripherals::CldoCrg::ptr() };
+        cldo.clk_sel().modify(|_, w| w.pwm_clk_sel().set_bit());
+        cldo.cken_ctl0().modify(|_, w| unsafe { w.pwm_cken().bits(PWM_CKEN_FIELD) });
+        // Reload the PWM0 divider: clear LOAD_DIV_EN, set the 4-bit divider,
+        // then set LOAD_DIV_EN (the rising edge latches it).
+        cldo.div_ctl3().modify(|_, w| w.pwm0_load_div_en().clear_bit());
+        cldo.div_ctl3().modify(|_, w| unsafe { w.pwm0_div1_cfg().bits(PWM_DIV_6) });
+        cldo.div_ctl3().modify(|_, w| w.pwm0_load_div_en().set_bit());
     }
 }
 

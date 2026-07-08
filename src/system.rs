@@ -43,10 +43,6 @@ pub enum ResetReason {
 //   chip-reset trigger:  GLB_CTL_M (0x4000_2000) + 0x110, set bit 2 (HAL_CHIP_RESET_REG)
 //   reset-reason record: GLB_CTL   (0x4000_0000) + 0xA0    (SYS_RST_RECORD_0)
 //   reason-clear:        GLB_CTL   (0x4000_0000) + 0xA4    (SYS_DIAG_CLR_1)
-const CHIP_RESET_REG: *mut u32 = 0x4000_2110 as *mut u32;
-const CHIP_RESET_ENABLE_BIT: u32 = 1 << 2;
-const SYS_RST_RECORD_0: *mut u32 = 0x4000_00A0 as *mut u32;
-const SYS_DIAG_CLR_1: *mut u32 = 0x4000_00A4 as *mut u32;
 // History bits in SYS_RST_RECORD_0.
 const SYS_WDT_RST_HIS: u32 = 0x1;
 const SYS_SOFT_RST_HIS: u32 = 0x2;
@@ -61,7 +57,9 @@ impl System<'_> {
     /// Reasons this SoC's record does not distinguish (`ExternalPin`, `BrownOut`)
     /// are never returned here. An empty record reads back as [`ResetReason::Unknown`].
     pub fn reset_reason(&self) -> ResetReason {
-        let val = unsafe { core::ptr::read_volatile(SYS_RST_RECORD_0) };
+        let r = unsafe { &*SysCtl0::ptr() };
+        let record = r.sys_rst_record_0().read();
+        let val = record.bits();
         let (reason, clr) = if val & SYS_WDT_RST_HIS != 0 {
             (ResetReason::Watchdog, SYS_WDT_RST_HIS)
         } else if val & SYS_SOFT_RST_HIS != 0 {
@@ -72,7 +70,7 @@ impl System<'_> {
             (ResetReason::Unknown, 0)
         };
         if clr != 0 {
-            unsafe { core::ptr::write_volatile(SYS_DIAG_CLR_1, clr) };
+            r.sys_diag_clr_1().write(|w| unsafe { w.sys_diag_clr().bits(clr) });
         }
         reason
     }
@@ -84,10 +82,8 @@ impl System<'_> {
     /// following spin loop completes.
     #[instability::unstable]
     pub fn software_reset(&self) -> ! {
-        unsafe {
-            let v = core::ptr::read_volatile(CHIP_RESET_REG);
-            core::ptr::write_volatile(CHIP_RESET_REG, v | CHIP_RESET_ENABLE_BIT);
-        }
+        let r = unsafe { &*GlbCtlM::ptr() };
+        r.chip_reset().modify(|_, w| w.chip_reset_en().set_bit());
         loop {
             core::hint::spin_loop();
         }

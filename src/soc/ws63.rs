@@ -90,11 +90,12 @@ pub const UART_BOOT_CLOCK_40M_HZ: u32 = 40_000_000;
 pub fn uart_boot_clock_hz() -> u32 {
     // HW_CTL TCXO-frequency-detect strap; bit 0: 1 = 24 MHz TCXO, 0 = 40 MHz
     // (CLK24M_TCXO = 1, CLK40M_TCXO = 0 in the vendor `soc_porting.h`).
-    const HW_CTL: usize = 0x4000_0014;
-    const REFCLK_FREQ_STATUS_MASK: u32 = 0x1;
-    // SAFETY: HW_CTL is a fixed read-only MMIO strap, always readable on WS63.
-    let hw_ctl = unsafe { core::ptr::read_volatile(HW_CTL as *const u32) };
-    if hw_ctl & REFCLK_FREQ_STATUS_MASK == 1 { UART_BOOT_CLOCK_24M_HZ } else { UART_BOOT_CLOCK_40M_HZ }
+    let sys_ctl0 = unsafe { &*crate::soc::pac::SysCtl0::ptr() };
+    if sys_ctl0.hw_ctl().read().refclk_freq_status().bit_is_set() {
+        UART_BOOT_CLOCK_24M_HZ
+    } else {
+        UART_BOOT_CLOCK_40M_HZ
+    }
 }
 
 /// SPI controller input clock / SSI_CLK (160 MHz, PLL-derived).

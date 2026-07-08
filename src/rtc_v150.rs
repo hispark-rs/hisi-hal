@@ -88,10 +88,9 @@ impl<'d> Rtc<'d> {
         self.regs().raw_intr().read().int_status().bit_is_set()
     }
 
-    /// Clear the timer interrupt by reading the per-instance EOI (`eoi_ren` is
-    /// read-to-clear).
+    /// Clear the timer interrupt by writing the per-instance EOI bit.
     pub fn clear_interrupt(&self) {
-        let _ = self.regs().eoi_ren().read().bits();
+        self.regs().eoi_ren().write(|w| w.eoi().set_bit());
     }
 }
 

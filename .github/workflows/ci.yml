@@ -25,6 +25,13 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  register-access:
+    name: Register access policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/check-register-access.py
+
   # NB: chip-ws63 and chip-bs21 are mutually exclusive (a compile_error in lib.rs),
   # so `--all-features` cannot be used. Test each chip with its supported feature
   # set instead. BS2X is experimental/no-silicon-HIL, so chip-bs21 always opts into

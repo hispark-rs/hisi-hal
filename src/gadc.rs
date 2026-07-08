@@ -9,70 +9,20 @@
 //! - the GADC digital block @ `0x5703_6000` (in `bs2x-pac` as `Gadc`): reset/clock,
 //!   channel select (`cfg_amux_1`), the done flag (`rpt_gadc_data_3` bit0) and the
 //!   result (`rpt_gadc_data_2`);
-//! - the ANA/LDO sub-block @ `0x5703_63D0` (GADC base + 0x3D0, NOT in `bs2x-pac`):
-//!   the AFE/ADC/VREF LDO power-up;
-//! - the PMU AFE sub-block @ `0x5700_8700` (NOT in `bs2x-pac`): MTCMOS power /
-//!   isolation / reset / clock and the `afe_gadc_cfg` enable handshake; plus an
-//!   AON isolation bit @ `0x5702_C230[10]`.
+//! - the ANA/LDO sub-block @ `0x5703_63D0` (GADC base + 0x3D0, modeled in the
+//!   same `Gadc` PAC register block): the AFE/ADC/VREF LDO power-up;
+//! - the PMU AFE sub-block @ `0x5700_8700` (in `bs2x-pac` as `AdcPmuAfe`):
+//!   MTCMOS power / isolation / reset / clock and the `afe_gadc_cfg` enable
+//!   handshake; plus `AonAfe.afe_iso[10]` @ `0x5702_C230`.
 //!
-//! The sub-blocks that `bs2x-pac` does not model are reached via raw pointer
-//! constants below (BS2X-correct addresses from `adc_porting.h`). The exact analog
-//! timing/trim magic values are the SDK defaults; they are reproduced where they
-//! matter for control flow and marked `TODO(bs2x)` where only silicon cares (the
-//! QEMU GADC model returns a fixed sample regardless of the analog config, so this
-//! driver's control path — power-up → channel select → trigger → poll done → read
-//! — is what is exercised on `-M bs21/bs22/bs20`).
+//! The exact analog timing/trim magic values are the SDK defaults; they are
+//! reproduced where they matter for control flow and marked `TODO(bs2x)` where
+//! only silicon cares (the QEMU GADC model returns a fixed sample regardless of
+//! the analog config, so this driver's control path — power-up → channel select
+//! → trigger → poll done → read — is what is exercised on `-M bs21/bs22/bs20`).
 
 use crate::peripherals::Gadc as GadcPeriph;
 use core::marker::PhantomData;
-
-// ── Sub-block base addresses not covered by bs2x-pac's `gadc` block ──────────
-const GADC_BASE: usize = 0x5703_6000; // GADC digital (also covers ANA at +0x3D0)
-const PMU_AFE_BASE: usize = 0x5700_8700; // PMU AFE (power/iso/rst/clk + afe_gadc_cfg)
-const AON_AFE_ISO: usize = 0x5702_C230; // AON: bit10 = AFE iso enable
-
-// PMU AFE register offsets (from GADC base 0x5700_8700)
-const PMU_AFE_ADC_RST_N: usize = 0x00;
-const PMU_AFE_GADC_CFG: usize = 0x08; // [0]s2d_en [1]s2d_mux_en [2]s2d_iso_en [3]done? [4]done(RO)
-const PMU_AFE_DIG_PWR_EN: usize = 0x20; // [0]pwr_en [1]iso_en [2]pwr_ack(RO)
-const PMU_AFE_SOFT_RST: usize = 0x24;
-const PMU_AFE_CLK_EN: usize = 0x28;
-const PMU_AFE_ISO_CFG: usize = 0x30;
-
-// ANA/LDO register offsets (GADC base + these; the ANA sub-block starts at +0x3D0)
-const ANA_CFG_ANA_0: usize = 0x3D4; // vrefldo
-const ANA_CFG_ANA_1: usize = 0x3D8; // bufp/bufn
-const ANA_CFG_ANA_4: usize = 0x3E4; // adcldo
-const ANA_CFG_ANA_5: usize = 0x3E8; // adcldo_en_dly
-const ANA_CFG_ANA_6: usize = 0x3EC; // afeldo
-const ANA_CFG_ANA_7: usize = 0x3F0; // afeldo_en_dly
-const ANA_CFG_FREG_5: usize = 0x408;
-const ANA_CFG_FREG_9: usize = 0x418;
-
-// afe_gadc_cfg bits
-const S2D_GADC_EN: u32 = 1 << 0;
-const S2D_GADC_MUX_EN: u32 = 1 << 1;
-const S2D_GADC_ISO_EN: u32 = 1 << 2;
-
-#[inline]
-unsafe fn rd(addr: usize) -> u32 {
-    unsafe { core::ptr::read_volatile(addr as *const u32) }
-}
-#[inline]
-unsafe fn wr(addr: usize, v: u32) {
-    unsafe { core::ptr::write_volatile(addr as *mut u32, v) }
-}
-#[inline]
-unsafe fn pmu_wr(off: usize, v: u32) {
-    unsafe { wr(PMU_AFE_BASE + off, v) }
-}
-#[inline]
-unsafe fn pmu_rmw(off: usize, clear: u32, set: u32) {
-    unsafe {
-        let v = (rd(PMU_AFE_BASE + off) & !clear) | set;
-        wr(PMU_AFE_BASE + off, v);
-    }
-}
 
 /// Rough microsecond busy-wait (the analog settling delays). Sized for the 64 MHz
 /// BS2X app core; only matters on silicon (QEMU ignores it).
@@ -136,6 +86,33 @@ impl<'d> Gadc<'d> {
         unsafe { &*GadcPeriph::ptr() }
     }
 
+    fn pmu_regs(&self) -> &'static crate::soc::pac::adc_pmu_afe::RegisterBlock {
+        // SAFETY: static physical MMIO address from bs2x-pac.
+        unsafe { &*crate::soc::pac::AdcPmuAfe::ptr() }
+    }
+
+    fn aon_afe_regs(&self) -> &'static crate::soc::pac::aon_afe::RegisterBlock {
+        // SAFETY: static physical MMIO address from bs2x-pac.
+        unsafe { &*crate::soc::pac::AonAfe::ptr() }
+    }
+
+    fn write_gadc_cfg(
+        pmu: &'static crate::soc::pac::adc_pmu_afe::RegisterBlock,
+        en: bool,
+        mux_en: bool,
+        iso_en: bool,
+    ) {
+        pmu.afe_gadc_cfg().write(|w| {
+            let w = if en { w.s2d_gadc_en().set_bit() } else { w.s2d_gadc_en().clear_bit() };
+            let w = if mux_en {
+                w.s2d_gadc_mux_en().set_bit()
+            } else {
+                w.s2d_gadc_mux_en().clear_bit()
+            };
+            if iso_en { w.s2d_gadc_iso_en().set_bit() } else { w.s2d_gadc_iso_en().clear_bit() }
+        });
+    }
+
     /// Power up the GADC and bring it live. Mirrors `hal_adc_v153_init` ->
     /// `_power_on` -> `_enable` -> `hal_gafe_enable` (fbb_bs2x).
     ///
@@ -149,50 +126,75 @@ impl<'d> Gadc<'d> {
     /// completes — [`Gadc::read`] then returns [`GadcError::ConversionTimeout`]
     /// rather than hanging. Not validated on silicon (QEMU returns a fixed sample).
     pub fn new(_gadc: GadcPeriph<'d>) -> Self {
-        let r = unsafe { &*GadcPeriph::ptr() };
-        unsafe {
-            // Phase A — block bring-up.
-            wr(AON_AFE_ISO, rd(AON_AFE_ISO) | (1 << 10)); // AFE iso enable (AON)
-            pmu_wr(PMU_AFE_ISO_CFG, 0); // release XO32M iso
-            delay_us(30);
-            pmu_wr(PMU_AFE_DIG_PWR_EN, 0x3); // MTCMOS power-on (pwr_en|iso_en)
-            delay_us(50);
-            pmu_rmw(PMU_AFE_DIG_PWR_EN, 1 << 1, 0); // release iso
-            pmu_wr(PMU_AFE_ADC_RST_N, 1); // ana rstn release
-            pmu_wr(PMU_AFE_CLK_EN, 1); // dig clk release
-            pmu_wr(PMU_AFE_SOFT_RST, 1); // dig apb rstn release
-            r.cfg_clken().write(|w| w.bits(0));
-            r.cfg_rstn().write(|w| w.bits(0));
-            r.cfg_clken().write(|w| w.bits(0x0011_1111)); // tst/bc/fc/byp/prechg/ctrl clocks on
+        let this = Self { _gadc: PhantomData, first_sample: true };
+        let r = this.regs();
+        let pmu = this.pmu_regs();
+        let aon = this.aon_afe_regs();
+        // Phase A — block bring-up.
+        aon.afe_iso().modify(|_, w| w.afe_iso_en().set_bit()); // AFE iso enable (AON)
+        pmu.afe_iso_cfg().write(|w| unsafe { w.bits(0) }); // release XO32M iso
+        delay_us(30);
+        // MTCMOS power-on (pwr_en|iso_en).
+        pmu.afe_dig_pwr_en().write(|w| w.afe_pwr_en().set_bit().afe_iso_en().set_bit());
+        delay_us(50);
+        pmu.afe_dig_pwr_en().modify(|_, w| w.afe_iso_en().clear_bit()); // release iso
+        pmu.afe_adc_rst_n().write(|w| w.afe_adc_rst_n().set_bit()); // ana rstn release
+        pmu.afe_clk_en().write(|w| w.afe_clk_en().set_bit()); // dig clk release
+        pmu.afe_soft_rst().write(|w| w.afe_soft_rst().set_bit()); // dig apb rstn release
+        r.cfg_clken().reset();
+        r.cfg_rstn().reset();
+        r.cfg_clken().write(|w| {
+            w.cfg_clken_tst()
+                .set_bit()
+                .cfg_gadc_clken_bc()
+                .set_bit()
+                .cfg_gadc_clken_fc()
+                .set_bit()
+                .cfg_gadc_clken_byp()
+                .set_bit()
+                .cfg_gadc_clken_prechg()
+                .set_bit()
+                .cfg_gadc_clken_ctrl()
+                .set_bit()
+        }); // tst/bc/fc/byp/prechg/ctrl clocks on
 
-            // Phase B — LDO power-on (ANA sub-block). TODO(bs2x): efuse LDO trim skipped.
-            wr(GADC_BASE + ANA_CFG_ANA_6, 0x1); // afeldo
-            delay_us(150);
-            wr(GADC_BASE + ANA_CFG_ANA_7, rd(GADC_BASE + ANA_CFG_ANA_7) | 0x1);
-            wr(GADC_BASE + ANA_CFG_ANA_4, 0x1); // adcldo
-            delay_us(150);
-            wr(GADC_BASE + ANA_CFG_ANA_5, rd(GADC_BASE + ANA_CFG_ANA_5) | 0x1);
-            wr(GADC_BASE + ANA_CFG_ANA_0, rd(GADC_BASE + ANA_CFG_ANA_0) | 0x1); // vrefldo_en
-            delay_us(150);
+        // Phase B — LDO power-on (ANA sub-block). TODO(bs2x): efuse LDO trim skipped.
+        r.cfg_ana_6().write(|w| w.cfg_afe_afeldo_en().set_bit()); // afeldo
+        delay_us(150);
+        r.cfg_ana_7().modify(|_, w| w.cfg_afe_afeldo_en_dly().set_bit());
+        r.cfg_ana_4().write(|w| w.cfg_afe_adcldo_en().set_bit()); // adcldo
+        delay_us(150);
+        r.cfg_ana_5().modify(|_, w| w.cfg_afe_adcldo_en_dly().set_bit());
+        r.cfg_ana_0().modify(|_, w| w.cfg_vrefldo_en().set_bit()); // vrefldo_en
+        delay_us(150);
 
-            // Phase C — common + GADC analog enable.
-            r.cfg_clk_div_0().write(|w| w.bits(0x27)); // TODO(bs2x): COMMON_DEFAULT clk div
-            wr(GADC_BASE + ANA_CFG_ANA_1, rd(GADC_BASE + ANA_CFG_ANA_1) | 0x3); // bufp|bufn
-            wr(GADC_BASE + ANA_CFG_FREG_5, 0);
-            wr(GADC_BASE + ANA_CFG_FREG_9, 0x2);
-            r.cfg_tst_1().write(|w| w.bits(2)); // ACCUMULATED_AVERAGE_OUTPUT diag node
-            r.cfg_rstn().write(|w| w.bits(0x0001_1111)); // release all GADC resets
-            r.cfg_iso().write(|w| w.bits(0));
+        // Phase C — common + GADC analog enable.
+        r.cfg_clk_div_0().write(|w| unsafe { w.cfg_adc_ana_div_th().bits(0x27) }); // TODO(bs2x): COMMON_DEFAULT clk div
+        r.cfg_ana_1().modify(|_, w| w.cfg_bufp_en().set_bit().cfg_bufn_en().set_bit());
+        r.cfg_freg_5().reset();
+        r.cfg_freg_9().write(|w| unsafe { w.bits(2) });
+        r.cfg_tst_1().write(|w| unsafe { w.diag_node().bits(2) }); // ACCUMULATED_AVERAGE_OUTPUT diag node
+        r.cfg_rstn().write(|w| {
+            w.cfg_rstn_tst()
+                .set_bit()
+                .cfg_gadc_rstn_bc()
+                .set_bit()
+                .cfg_gadc_rstn_fc()
+                .set_bit()
+                .cfg_gadc_rstn_data()
+                .set_bit()
+                .cfg_gadc_rstn_ana()
+                .set_bit()
+        }); // release all GADC resets
+        r.cfg_iso().write(|w| unsafe { w.bits(0) });
 
-            // hal_gafe_enable: afe_gadc_cfg power-up handshake.
-            pmu_wr(PMU_AFE_GADC_CFG, S2D_GADC_ISO_EN | S2D_GADC_MUX_EN);
-            delay_us(30);
-            pmu_rmw(PMU_AFE_GADC_CFG, S2D_GADC_ISO_EN, 0);
-            delay_us(30);
-            pmu_rmw(PMU_AFE_GADC_CFG, 0, S2D_GADC_EN);
-        }
-        let _ = r;
-        Self { _gadc: PhantomData, first_sample: true }
+        // hal_gafe_enable: afe_gadc_cfg power-up handshake.
+        Self::write_gadc_cfg(pmu, false, true, true);
+        delay_us(30);
+        Self::write_gadc_cfg(pmu, false, true, false);
+        delay_us(30);
+        Self::write_gadc_cfg(pmu, true, true, false);
+        this
     }
 
     /// Select `channel`, run one conversion, and return the raw 18-bit signed
@@ -207,13 +209,19 @@ impl<'d> Gadc<'d> {
         let r = self.regs();
         // Channel select: p-side one-hot = BIT(channel), n-side = BIT(VSSAFE1),
         // both divide-disable. cfg_amux_1: amuxn[10:0], amuxp[22:12].
-        let amuxp = 1u32 << (channel as u32);
-        let amuxn = 1u32 << VSSAFE1_BIT;
-        let v = (amuxn & 0x7FF) | (1 << 11) | ((amuxp & 0x7FF) << 12) | (1 << 23);
-        unsafe {
-            r.cfg_amux_1().write(|w| w.bits(v));
-            r.cfg_amux_2().write(|w| w.bits(0));
-        }
+        let amuxp = 1u16 << (channel as u16);
+        let amuxn = 1u16 << VSSAFE1_BIT;
+        r.cfg_amux_1().write(|w| unsafe {
+            w.amuxn_sensor_ch_sel()
+                .bits(amuxn)
+                .amuxn_devide_disable()
+                .set_bit()
+                .amuxp_sensor_ch_sel()
+                .bits(amuxp)
+                .amuxp_devide_disable()
+                .set_bit()
+        });
+        r.cfg_amux_2().reset();
 
         // The very first sample after power-up is discarded.
         if self.first_sample {
@@ -226,39 +234,41 @@ impl<'d> Gadc<'d> {
     /// Trigger one conversion, poll done (bounded), read + sign-extend the result.
     fn convert_once(&self) -> Result<i32, GadcError> {
         let r = self.regs();
-        unsafe {
-            // Trigger (hal_gadc_iso_on): un-isolate + enable -> free-running scan.
-            delay_us(5);
-            pmu_rmw(PMU_AFE_GADC_CFG, 0, S2D_GADC_MUX_EN);
-            pmu_rmw(PMU_AFE_GADC_CFG, S2D_GADC_ISO_EN, 0);
-            delay_us(5);
-            pmu_rmw(PMU_AFE_GADC_CFG, 0, S2D_GADC_EN);
+        let pmu = self.pmu_regs();
+        // Trigger (hal_gadc_iso_on): un-isolate + enable -> free-running scan.
+        delay_us(5);
+        pmu.afe_gadc_cfg().modify(|_, w| w.s2d_gadc_mux_en().set_bit());
+        pmu.afe_gadc_cfg().modify(|_, w| w.s2d_gadc_iso_en().clear_bit());
+        delay_us(5);
+        pmu.afe_gadc_cfg().modify(|_, w| w.s2d_gadc_en().set_bit());
 
-            // Poll done: rpt_gadc_data_3 bit0 (GADC block). Bounded so an unpowered
-            // AFE returns ConversionTimeout instead of hanging.
-            let mut done = false;
-            for _ in 0..GADC_DONE_POLL_LIMIT {
-                if r.rpt_gadc_data_3().read().bits() & 0x1 != 0 {
-                    done = true;
-                    break;
-                }
-                core::hint::spin_loop();
+        // Poll done: rpt_gadc_data_3 bit0 (GADC block). Bounded so an unpowered
+        // AFE returns ConversionTimeout instead of hanging.
+        let mut done = false;
+        for _ in 0..GADC_DONE_POLL_LIMIT {
+            if r.rpt_gadc_data_3().read().single_sample_done().bit_is_set() {
+                done = true;
+                break;
             }
-
-            // Stop / re-isolate (hal_gadc_iso_off) — always, even on timeout, so the
-            // AFE is left isolated rather than free-running.
-            pmu_rmw(PMU_AFE_GADC_CFG, S2D_GADC_EN, 0);
-            delay_us(5);
-            pmu_rmw(PMU_AFE_GADC_CFG, S2D_GADC_MUX_EN, S2D_GADC_ISO_EN);
-
-            if !done {
-                return Err(GadcError::ConversionTimeout);
-            }
-
-            // Read result + sign-extend (18-bit signed, sign bit 17).
-            let raw = r.rpt_gadc_data_2().read().bits();
-            Ok(sign_extend18(raw))
+            core::hint::spin_loop();
         }
+
+        // Stop / re-isolate (hal_gadc_iso_off) — always, even on timeout, so the
+        // AFE is left isolated rather than free-running.
+        pmu.afe_gadc_cfg().modify(|_, w| w.s2d_gadc_en().clear_bit());
+        delay_us(5);
+        pmu.afe_gadc_cfg().modify(|_, w| {
+            w.s2d_gadc_mux_en().clear_bit();
+            w.s2d_gadc_iso_en().set_bit()
+        });
+
+        if !done {
+            return Err(GadcError::ConversionTimeout);
+        }
+
+        // Read result + sign-extend (18-bit signed, sign bit 17).
+        let raw = r.rpt_gadc_data_2().read().sample_data().bits();
+        Ok(sign_extend18(raw))
     }
 }
 
