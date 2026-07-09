@@ -69,7 +69,7 @@ const GADC_DONE_POLL_LIMIT: u32 = 1_000_000;
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
 pub enum GadcError {
-    /// The conversion-done flag did not assert within [`GADC_DONE_POLL_LIMIT`]
+    /// The conversion-done flag did not assert within `GADC_DONE_POLL_LIMIT`
     /// spins — the analog front-end is unpowered or the trigger handshake stalled.
     ConversionTimeout,
 }
