@@ -62,11 +62,12 @@ macro_rules! peripheral {
 }
 
 macro_rules! peripherals {
-    ($($field:ident => $ty:ident),* $(,)?) => {
+    ($($(#[$meta:meta])* $field:ident => $ty:ident),* $(,)?) => {
         /// Owns every peripheral singleton for the selected chip; obtain once via [`Peripherals::take()`].
         #[allow(non_snake_case)]
         pub struct Peripherals {
             $(
+                $(#[$meta])*
                 #[doc = concat!("`", stringify!($field), "` peripheral")]
                 pub $field: $ty<'static>,
             )*
@@ -93,6 +94,7 @@ macro_rules! peripherals {
                 unsafe {
                     Self {
                         $(
+                            $(#[$meta])*
                             $field: $ty::steal(),
                         )*
                     }
@@ -130,6 +132,8 @@ mod ws63_only {
     use super::PhantomData;
     peripheral!(SysCtl0, crate::soc::pac::SysCtl0);
     peripheral!(SysCtl1, crate::soc::pac::SysCtl1);
+    #[cfg(feature = "unstable")]
+    peripheral!(Cmu, crate::soc::pac::Cmu);
     peripheral!(CldoCrg, crate::soc::pac::CldoCrg);
     peripheral!(IoConfig, crate::soc::pac::IoConfig);
     peripheral!(I2s, crate::soc::pac::I2s);
@@ -174,6 +178,8 @@ pub use bs21_only::*;
 peripherals!(
     SYS_CTL0 => SysCtl0,
     SYS_CTL1 => SysCtl1,
+    #[cfg(feature = "unstable")]
+    CMU => Cmu,
     GLB_CTL_M => GlbCtlM,
     CLDO_CRG => CldoCrg,
     IO_CONFIG => IoConfig,

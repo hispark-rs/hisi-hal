@@ -236,6 +236,11 @@ unstable_module! {
     #[cfg(feature = "chip-ws63")]
     pub mod safety;
 }
+unstable_driver! {
+    /// WS63 application-owned RF analog-power and clock preparation.
+    #[cfg(feature = "chip-ws63")]
+    pub mod rf_power;
+}
 unstable_module! {
     /// SFC (serial flash controller) driver.
     #[cfg(feature = "chip-ws63")]
