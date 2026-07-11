@@ -142,6 +142,7 @@ mod ws63_only {
     peripheral!(Km, crate::soc::pac::Km);
     peripheral!(RfWbCtl, crate::soc::pac::RfWbCtl);
     peripheral!(ShareMemCtl, crate::soc::pac::ShareMemCtl);
+    peripheral!(BtEmCtl, crate::soc::pac::BtEmCtl);
     peripheral!(FamaRemap, crate::soc::pac::FamaRemap);
 }
 #[cfg(feature = "chip-ws63")]
@@ -205,6 +206,7 @@ peripherals!(
     TRNG => Trng,
     RF_WB_CTL => RfWbCtl,
     SHARE_MEM_CTL => ShareMemCtl,
+    BT_EM_CTL => BtEmCtl,
     FAMA_REMAP => FamaRemap,
 );
 

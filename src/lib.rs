@@ -251,6 +251,11 @@ pub mod spi;
 /// System control block access and the `System` token.
 #[cfg(feature = "chip-ws63")]
 pub mod system;
+unstable_module! {
+    /// WS63 configurable shared-RAM ownership and clock control.
+    #[cfg(feature = "chip-ws63")]
+    pub mod shared_memory;
+}
 // TRNG differs per chip: WS63 (trng.rs) vs BS2X v1 (trng_v1.rs). Both `hal::trng`.
 /// True random number generator driver (WS63).
 #[cfg(feature = "chip-ws63")]
