@@ -97,3 +97,27 @@ pub unsafe fn flush_range(addr: usize, len: usize) {
     // DCC | DCIV | VA
     unsafe { maintain(addr, len, 0xd) }
 }
+
+/// Clean and invalidate the entire D-cache.
+///
+/// This matches the vendor LiteOS `ArchDCacheFlush()` operation. Prefer the
+/// range operations when ownership is limited to a known buffer; this function
+/// exists for vendor ABI shims that explicitly request a whole-cache flush.
+///
+/// # Safety
+///
+/// The caller must ensure that globally flushing the D-cache cannot race with
+/// another execution context that owns cacheable memory.
+#[inline]
+pub unsafe fn flush_all() {
+    #[cfg(target_arch = "riscv32")]
+    unsafe {
+        // DCC | DCIV, without VA: operate on the complete D-cache.
+        core::arch::asm!(
+            "csrw 0x7c3, {command}",
+            "fence",
+            command = in(reg) 0xc,
+            options(nostack),
+        );
+    }
+}
