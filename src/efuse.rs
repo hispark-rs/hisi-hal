@@ -95,6 +95,10 @@ impl<'d> EfuseDriver<'d> {
         driver
     }
 
+    pub(crate) fn into_inner(self) -> Efuse<'d> {
+        self._efuse
+    }
+
     fn regs() -> &'static crate::soc::pac::efuse::RegisterBlock {
         // SAFETY: PAC peripheral pointer is a static physical MMIO address, always valid.
         unsafe { &*Efuse::ptr() }
