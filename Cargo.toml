@@ -1,6 +1,6 @@
 [package]
 name = "hisi-riscv-hal"
-version = "0.6.0-rc.1"
+version = "0.6.0"
 edition = "2024"
 description = "Hardware Abstraction Layer for HiSilicon WS63 (RISC-V RV32IMFC_Zicsr)"
 license = "MIT"

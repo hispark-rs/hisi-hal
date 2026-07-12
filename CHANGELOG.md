@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-12
+
+The first stable release of the 0.6 API line. Its default WS63 public surface,
+feature semantics, and silicon evidence are unchanged from `0.6.0-rc.1`:
+30/30 stable HIL tests and 32/32 tests with `unstable` passed on real WS63.
+DMA, Embassy, RF helpers, BS2X, and other ungraduated surfaces remain opt-in
+experimental APIs.
+
 ## [0.6.0-rc.1] - 2026-07-12
 
 First release candidate for the 0.6.0 stable-API cycle. This release freezes

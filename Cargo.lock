@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "hisi-riscv-hal"
-version = "0.6.0-rc.1"
+version = "0.6.0"
 dependencies = [
  "bs2x-pac",
  "cfg-if",
@@ -344,9 +344,9 @@ dependencies = [
 
 [[package]]
 name = "hisi-riscv-rt"
-version = "0.5.1"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e532dc4d87998a117f6dc3743fb85d19c557f4456e78e2d668aebca4eeb11d13"
+checksum = "a7e9628a0d7c26bcddf28beace336fdc40343189fc2ce0c2942a5d2696522099"
 dependencies = [
  "bs2x-pac",
  "critical-section",
