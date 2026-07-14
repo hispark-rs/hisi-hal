@@ -12,9 +12,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   exports strong device interrupt symbols from the HAL library. Firmware owns
   vector routing and calls the corresponding `on_interrupt` hook, preventing
   Cargo feature unification from installing handlers in unrelated binaries.
-- Require `ws63-pac 0.2.3` for the software-interrupt vectors used by the
-  scheduler port. Timer EOI remains a complete write-only command, expressed
-  without depending on generated field methods so the BS2X PAC stays compatible.
+- Require `ws63-pac 0.3.0` for the software-interrupt vectors and corrected
+  write-only timer EOI model used by the scheduler port. Timer EOI is expressed
+  as a complete command write so the BS2X PAC stays compatible.
 
 ## [0.7.0-alpha.1] - 2026-07-12
 

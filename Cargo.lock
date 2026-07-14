@@ -339,7 +339,7 @@ dependencies = [
  "portable-atomic",
  "proptest",
  "semihosting",
- "ws63-pac",
+ "ws63-pac 0.3.0",
 ]
 
 [[package]]
@@ -352,7 +352,7 @@ dependencies = [
  "critical-section",
  "riscv",
  "riscv-rt",
- "ws63-pac",
+ "ws63-pac 0.2.4",
 ]
 
 [[package]]
@@ -778,9 +778,20 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "ws63-pac"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b1031e9c841dceab8b7fb846affef7d33647a1e2cad3a6dbd2c0d1c26ae8750"
+checksum = "07a9c43ac3b182f9eff0a48062f71218394c004e2b5533ed29edd7d6118908aa"
+dependencies = [
+ "critical-section",
+ "riscv",
+ "vcell",
+]
+
+[[package]]
+name = "ws63-pac"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c99311eba3f7b88f359749accf78a3c31918af1476f17086987169062c2066d"
 dependencies = [
  "critical-section",
  "riscv",

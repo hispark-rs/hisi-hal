@@ -28,7 +28,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 # Exactly one PAC is linked, selected by the chip feature below. Optional so the
 # inactive one is never compiled.
-ws63-pac = { version = "0.2.3", default-features = false, features = ["critical-section"], optional = true }
+ws63-pac = { version = "0.3.0", default-features = false, features = ["critical-section"], optional = true }
 bs2x-pac = { version = "0.1.2", default-features = false, features = ["critical-section"], optional = true }
 embedded-hal = "1.0.0"
 embedded-hal-nb = "1.0"
