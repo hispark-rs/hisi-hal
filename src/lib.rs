@@ -86,6 +86,11 @@ pub mod prelude;
 mod private;
 /// SoC-specific constants and PAC aliases for the selected chip.
 pub mod soc;
+unstable_module! {
+    /// WS63 CPU software-interrupt source used for deferred scheduling.
+    #[cfg(feature = "chip-ws63")]
+    pub mod software_interrupt;
+}
 /// TCXO always-on clock/counter driver.
 pub mod tcxo;
 /// Time/frequency newtypes (`Hertz`, durations) used across the HAL.
