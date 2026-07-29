@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Add an unstable, read-only WS63 WLMAC receive-counter snapshot backed by the
+  generated `WlmacStats` PAC register block.
+
+### Changed
+
+- Require `ws63-pac 0.4.1` for the audited WLMAC receive-counter register model.
+
 ## [0.7.0-alpha.3] - 2026-07-17
 
 ### Fixed

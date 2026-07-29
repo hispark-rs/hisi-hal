@@ -99,6 +99,11 @@ pub mod time;
 pub mod timer;
 /// UART serial driver (blocking and `embedded-io`).
 pub mod uart;
+unstable_module! {
+    /// Read-only WS63 Wi-Fi MAC diagnostic counters.
+    #[cfg(feature = "chip-ws63")]
+    pub mod wlmac;
+}
 
 // ── WS63-specific / not-yet-ported-to-BS21 drivers ──────────────────────────
 // Gated to chip-ws63 for now: they touch WS63-only peripherals (Wi-Fi/RF, the
