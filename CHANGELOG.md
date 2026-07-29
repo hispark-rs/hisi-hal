@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.0-alpha.4] - 2026-07-29
+
 ### Added
 
 - Add an unstable, read-only WS63 WLMAC receive-counter snapshot backed by the
