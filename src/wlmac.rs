@@ -29,8 +29,8 @@ pub struct WlmacRxCounters {
 /// A read-only snapshot of the active VAP0 receive-filter identity.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WlmacFilterState {
-    /// Vendor receive-filter command currently programmed into WLMAC.
-    pub rx_filter_command: u32,
+    /// Packed receive-filter control state currently programmed into WLMAC.
+    pub rx_filter_control: u32,
     /// Station address programmed for hardware VAP0.
     pub station_address: [u8; 6],
     /// BSSID programmed for hardware VAP0.
@@ -106,7 +106,7 @@ impl WlmacDiagnostics {
             let heads = regs.vap0_address_heads().read();
 
             WlmacFilterState {
-                rx_filter_command: regs.rx_filter_command().read().command().bits(),
+                rx_filter_control: regs.rx_filter_control().read().control().bits(),
                 station_address: decode_address(
                     heads.station().bits(),
                     regs.vap0_station_address_tail().read().bytes().bits(),
@@ -122,8 +122,8 @@ impl WlmacDiagnostics {
 
 #[inline]
 fn decode_address(head: u16, tail: u32) -> [u8; 6] {
-    let head = head.to_le_bytes();
-    let tail = tail.to_le_bytes();
+    let head = head.to_be_bytes();
+    let tail = tail.to_be_bytes();
     [head[0], head[1], tail[0], tail[1], tail[2], tail[3]]
 }
 
@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn decodes_vendor_address_register_order() {
         assert_eq!(
-            decode_address(0x1102, 0xa5_24_63_42),
+            decode_address(0x02_11, 0x42_63_24_a5),
             [0x02, 0x11, 0x42, 0x63, 0x24, 0xa5]
         );
     }

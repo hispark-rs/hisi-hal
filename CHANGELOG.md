@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.0-alpha.6] - 2026-07-30
+
+### Changed
+
+- Rename the unstable WLMAC diagnostic field from `rx_filter_command` to
+  `rx_filter_control`, matching the packed register semantics.
+- Require `ws63-pac 0.4.3` for the corrected generated accessor.
+
+### Fixed
+
+- Decode VAP0 station and BSSID head/tail registers in network byte order.
+  The resulting station-address match was verified on WS63 silicon.
+
 ## [0.7.0-alpha.5] - 2026-07-30
 
 ### Added
