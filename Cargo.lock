@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "hisi-hal"
-version = "0.7.0-alpha.4"
+version = "0.7.0-alpha.5"
 dependencies = [
  "bs2x-pac",
  "cfg-if",
@@ -789,9 +789,9 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "ws63-pac"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b76107bc4fb92a3f3a3a43bb0f76cd6096f76449df707df5a20523c8d7a5555d"
+checksum = "a809183509cac46e71eb18033f4d24cc5cdec70411400afd5b5ce11a714ecc1e"
 dependencies = [
  "critical-section",
  "riscv",

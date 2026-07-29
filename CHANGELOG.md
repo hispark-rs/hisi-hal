@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.0-alpha.5] - 2026-07-30
+
+### Added
+
+- Add an unstable, read-only WS63 WLMAC receive-filter snapshot for the active
+  filter command and VAP0 station/BSSID identity, including byte-order tests.
+
+### Changed
+
+- Require `ws63-pac 0.4.2` for the generated WLMAC filter diagnostics.
+
 ## [0.7.0-alpha.4] - 2026-07-29
 
 ### Added

@@ -26,6 +26,17 @@ pub struct WlmacRxCounters {
     pub rx_filtered_mpdu: u16,
 }
 
+/// A read-only snapshot of the active VAP0 receive-filter identity.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WlmacFilterState {
+    /// Vendor receive-filter command currently programmed into WLMAC.
+    pub rx_filter_command: u32,
+    /// Station address programmed for hardware VAP0.
+    pub station_address: [u8; 6],
+    /// BSSID programmed for hardware VAP0.
+    pub bssid: [u8; 6],
+}
+
 /// Read-only access to initialized WS63 WLMAC diagnostic counters.
 ///
 /// This capability is neither `Send` nor `Sync`. Constructing another instance
@@ -80,5 +91,51 @@ impl WlmacDiagnostics {
                 rx_filtered_mpdu: regs.rx_filtered_mpdu_count().read().count().bits(),
             }
         })
+    }
+
+    /// Reads the active receive-filter command and VAP0 address identity.
+    ///
+    /// Interrupts are masked only while taking the four-register snapshot. The
+    /// vendor WLMAC state machine owns these registers, so callers must treat
+    /// the result as diagnostic evidence rather than a configuration surface.
+    #[inline]
+    pub fn snapshot_filter_state(&self) -> WlmacFilterState {
+        critical_section::with(|_| {
+            // SAFETY: construction requires the caller to keep WLMAC accessible.
+            let regs = unsafe { &*pac::WlmacStats::ptr() };
+            let heads = regs.vap0_address_heads().read();
+
+            WlmacFilterState {
+                rx_filter_command: regs.rx_filter_command().read().command().bits(),
+                station_address: decode_address(
+                    heads.station().bits(),
+                    regs.vap0_station_address_tail().read().bytes().bits(),
+                ),
+                bssid: decode_address(
+                    heads.bssid().bits(),
+                    regs.vap0_bssid_tail().read().bytes().bits(),
+                ),
+            }
+        })
+    }
+}
+
+#[inline]
+fn decode_address(head: u16, tail: u32) -> [u8; 6] {
+    let head = head.to_le_bytes();
+    let tail = tail.to_le_bytes();
+    [head[0], head[1], tail[0], tail[1], tail[2], tail[3]]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_address;
+
+    #[test]
+    fn decodes_vendor_address_register_order() {
+        assert_eq!(
+            decode_address(0x1102, 0xa5_24_63_42),
+            [0x02, 0x11, 0x42, 0x63, 0x24, 0xa5]
+        );
     }
 }
