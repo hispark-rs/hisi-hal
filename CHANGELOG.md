@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.0-alpha.7] - 2026-08-04
+
+### Added
+
+- Add an unstable, read-only WS63 WLMAC snapshot for CCMP/TKIP replay,
+  MIC, and key-search failure counters used by connectivity diagnostics.
+
+### Fixed
+
+- Add the SDK-compatible completion barrier after enabling a local interrupt,
+  so device state published before the enable cannot be reordered after it.
+
 ## [0.7.0-alpha.6] - 2026-07-30
 
 ### Changed
