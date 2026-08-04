@@ -26,6 +26,21 @@ pub struct WlmacRxCounters {
     pub rx_filtered_mpdu: u16,
 }
 
+/// A snapshot of receive-security failures used by the WS63 mask-ROM helper.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WlmacRxSecurityCounters {
+    /// CCMP replay failures.
+    pub ccmp_replay_failures: u16,
+    /// TKIP replay failures.
+    pub tkip_replay_failures: u16,
+    /// CCMP MIC failures.
+    pub ccmp_mic_failures: u16,
+    /// TKIP MIC failures.
+    pub tkip_mic_failures: u16,
+    /// Receive key-search failures.
+    pub key_search_failures: u16,
+}
+
 /// A read-only snapshot of the active VAP0 receive-filter identity.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WlmacFilterState {
@@ -89,6 +104,34 @@ impl WlmacDiagnostics {
                 rx_success_mpdu: regs.rx_success_mpdu_count().read().count().bits(),
                 rx_failed_mpdu: regs.rx_failed_mpdu_count().read().count().bits(),
                 rx_filtered_mpdu: regs.rx_filtered_mpdu_count().read().count().bits(),
+            }
+        })
+    }
+
+    /// Reads the WLMAC receive replay, MIC, and key-search failure counters.
+    ///
+    /// These registers are the three security-counter inputs consumed by the
+    /// mask-ROM `hh503_get_mac_statistics_data` helper. As with
+    /// [`Self::snapshot_rx`], hardware can increment them during the bounded
+    /// snapshot.
+    #[inline]
+    pub fn snapshot_rx_security(&self) -> WlmacRxSecurityCounters {
+        critical_section::with(|_| {
+            // SAFETY: construction requires the caller to keep WLMAC accessible.
+            let regs = unsafe { &*pac::WlmacStats::ptr() };
+            let replay = regs.rx_replay_failure_count().read();
+            let mic = regs.rx_mic_failure_count().read();
+
+            WlmacRxSecurityCounters {
+                ccmp_replay_failures: replay.ccmp().bits(),
+                tkip_replay_failures: replay.tkip().bits(),
+                ccmp_mic_failures: mic.ccmp().bits(),
+                tkip_mic_failures: mic.tkip().bits(),
+                key_search_failures: regs
+                    .rx_key_search_failure_count()
+                    .read()
+                    .count()
+                    .bits(),
             }
         })
     }
