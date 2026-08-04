@@ -324,6 +324,13 @@ pub unsafe fn enable(irq: Interrupt) {
         let shift = ((n - SYS_VECTOR_CNT) % LOCIPRI_IRQ_NUM) * LOCIPRI_IRQ_BITS;
         locipri_set_field(reg, shift, 1);
     }
+    // Match the SDK's `osal_irq_enable()` completion barrier. Callers may
+    // publish device state immediately before enabling the line, so the
+    // controller update must not be observed ahead of those writes.
+    #[cfg(target_arch = "riscv32")]
+    unsafe {
+        core::arch::asm!("fence", options(nostack));
+    }
 }
 
 /// Disable an interrupt source at the controller and clear any latched pending
