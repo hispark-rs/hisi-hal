@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.0-alpha.8] - 2026-08-13
+
+### Added
+
+- Add unstable, bounded WS63 SFC erase, program, and readback command
+  transactions for runtime storage updates.
+
+### Fixed
+
+- Place WS63 SFC command transactions in `.hisi.sram-text` so they continue to
+  execute while the flash XIP command path is temporarily unavailable.
+- Require `hisi-riscv-rt 0.5.9`, which preserves the SRAM text section in the
+  final WS63 linker layout.
+
 ## [0.7.0-alpha.7] - 2026-08-04
 
 ### Added
