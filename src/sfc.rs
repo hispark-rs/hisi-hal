@@ -145,6 +145,7 @@ const fn command_config_bits(
     config
 }
 
+#[inline(always)]
 const fn validate_program_chunk(flash_offset: u32, length: usize) -> Result<(), SfcError> {
     const COMMAND_BUFFER_SIZE: usize = 64;
     const NOR_PAGE_SIZE: usize = 256;
@@ -156,6 +157,15 @@ const fn validate_program_chunk(flash_offset: u32, length: usize) -> Result<(), 
         return Err(SfcError::ProgramCrossesPage);
     }
     Ok(())
+}
+
+#[inline(always)]
+const fn validate_command_buffer(length: usize) -> Result<(), SfcError> {
+    if length == 0 || length > 64 {
+        Err(SfcError::InvalidProgramLength)
+    } else {
+        Ok(())
+    }
 }
 
 /// SFC driver.
@@ -172,16 +182,23 @@ impl<'d> SfcDriver<'d> {
         Self { _sfc: sfc }
     }
 
+    #[inline(always)]
     fn regs(&self) -> &'static crate::soc::pac::sfc_cfg::RegisterBlock {
         // SAFETY: PAC peripheral pointer is a static physical MMIO address, always valid
         unsafe { &*SfcCfg::ptr() }
     }
 
+    #[cfg_attr(target_arch = "riscv32", unsafe(link_section = ".sram_text.sfc"))]
+    #[inline(never)]
     fn wait_command(&self) -> Result<(), SfcError> {
         const COMMAND_POLL_LIMIT: usize = 1_000_000;
 
         for _ in 0..COMMAND_POLL_LIMIT {
             if !self.regs().cmd_config().read().start().bit_is_set() {
+                // Command-mode fields continue to own the external flash even
+                // after `start` auto-clears. Return the controller to its idle
+                // configuration before executing further code through XIP.
+                unsafe { self.regs().cmd_config().write(|w| w.bits(0)) };
                 return Ok(());
             }
             core::hint::spin_loop();
@@ -189,6 +206,8 @@ impl<'d> SfcDriver<'d> {
         Err(SfcError::Timeout)
     }
 
+    #[cfg_attr(target_arch = "riscv32", unsafe(link_section = ".sram_text.sfc"))]
+    #[inline(never)]
     fn issue_status_command(&self, instruction: u8, write_data: Option<u8>) -> Result<(), SfcError> {
         let r = self.regs();
         if let Some(value) = write_data {
@@ -203,6 +222,8 @@ impl<'d> SfcDriver<'d> {
         self.wait_command()
     }
 
+    #[cfg_attr(target_arch = "riscv32", unsafe(link_section = ".sram_text.sfc"))]
+    #[inline(never)]
     fn read_status(&self, register: FlashStatusRegister) -> Result<u8, SfcError> {
         let r = self.regs();
         unsafe { r.cmd_ins().write(|w| w.bits(register.read_command() as u32)) };
@@ -212,6 +233,8 @@ impl<'d> SfcDriver<'d> {
         Ok(r.cmd_databuf_0().read().bits() as u8)
     }
 
+    #[cfg_attr(target_arch = "riscv32", unsafe(link_section = ".sram_text.sfc"))]
+    #[inline(never)]
     fn wait_flash_ready(&self) -> Result<(), SfcError> {
         const READY_POLL_LIMIT: usize = 100_000;
 
@@ -230,6 +253,8 @@ impl<'d> SfcDriver<'d> {
     /// are emitted as one indivisible controller sequence. SPI NOR forbids any
     /// intervening command, including a readiness poll. Callers must provide
     /// external exclusion for the complete operation.
+    #[cfg_attr(target_arch = "riscv32", unsafe(link_section = ".sram_text.sfc"))]
+    #[inline(never)]
     pub fn write_volatile_status(
         &mut self,
         register: FlashStatusRegister,
@@ -252,11 +277,30 @@ impl<'d> SfcDriver<'d> {
         }
     }
 
+    /// Reset the external SPI NOR command state and return the SFC to XIP.
+    ///
+    /// `RSTEN` and `RST` are emitted without an intervening flash command. The
+    /// operation runs from SRAM and returns only after the flash is ready and
+    /// the indirect-command register is idle. Callers must exclude concurrent
+    /// SFC users and prevent flash-resident interrupt handlers while it runs.
+    #[cfg_attr(target_arch = "riscv32", unsafe(link_section = ".sram_text.sfc"))]
+    #[inline(never)]
+    pub fn reset_flash(&mut self) -> Result<(), SfcError> {
+        self.issue_status_command(0x66, None)?;
+        self.issue_status_command(0x99, None)?;
+        self.wait_flash_ready()
+    }
+
     /// Program at most one 64-byte command-buffer chunk within one NOR page.
     ///
     /// `flash_offset` is relative to the start of the external flash, not the
-    /// CPU XIP address. The caller must ensure the destination is erased and
-    /// must externally exclude all other SFC command users.
+    /// CPU XIP address. The caller must ensure the destination is erased,
+    /// externally exclude all other SFC command users. The complete command
+    /// path runs from SRAM because the same controller backs instruction XIP.
+    /// The method returns only after the NOR WIP bit clears and command mode is
+    /// idle, so executing the caller's next flash-resident instruction is safe.
+    #[cfg_attr(target_arch = "riscv32", unsafe(link_section = ".sram_text.sfc"))]
+    #[inline(never)]
     pub fn program_chunk(&mut self, flash_offset: u32, data: &[u8]) -> Result<(), SfcError> {
         validate_program_chunk(flash_offset, data.len())?;
 
@@ -277,6 +321,32 @@ impl<'d> SfcDriver<'d> {
         unsafe { r.cmd_config().write(|w| w.bits(config)) };
         self.wait_command()?;
         self.wait_flash_ready()
+    }
+
+    /// Read at most one 64-byte command-buffer chunk without using the XIP alias.
+    ///
+    /// The complete transaction runs from SRAM, making this suitable for
+    /// verifying a page program before flash-resident execution resumes.
+    #[cfg_attr(target_arch = "riscv32", unsafe(link_section = ".sram_text.sfc"))]
+    #[inline(never)]
+    pub fn read_chunk(&mut self, flash_offset: u32, output: &mut [u8]) -> Result<(), SfcError> {
+        validate_command_buffer(output.len())?;
+        self.wait_flash_ready()?;
+
+        let r = self.regs();
+        unsafe {
+            r.cmd_ins().write(|w| w.bits(0x03));
+            r.cmd_addr().write(|w| w.bits(flash_offset));
+        }
+        let config = command_config_bits(true, true, true, true, output.len());
+        unsafe { r.cmd_config().write(|w| w.bits(config)) };
+        self.wait_command()?;
+
+        for (index, destination) in output.chunks_mut(4).enumerate() {
+            let bytes = Self::read_databuf(r, index).to_le_bytes();
+            destination.copy_from_slice(&bytes[..destination.len()]);
+        }
+        Ok(())
     }
 
     // ── Global configuration ───────────────────────────────────────
@@ -364,6 +434,8 @@ impl<'d> SfcDriver<'d> {
     // ── Command operations ──────────────────────────────────────────
 
     /// Write a 32-bit word to a specific data buffer register.
+    #[cfg_attr(target_arch = "riscv32", unsafe(link_section = ".sram_text.sfc"))]
+    #[inline(never)]
     fn write_databuf(r: &crate::soc::pac::sfc_cfg::RegisterBlock, idx: usize, word: u32) {
         unsafe {
             match idx {
@@ -421,6 +493,8 @@ impl<'d> SfcDriver<'d> {
     }
 
     /// Read a 32-bit word from a specific data buffer register.
+    #[cfg_attr(target_arch = "riscv32", unsafe(link_section = ".sram_text.sfc"))]
+    #[inline(never)]
     fn read_databuf(r: &crate::soc::pac::sfc_cfg::RegisterBlock, idx: usize) -> u32 {
         match idx {
             0 => r.cmd_databuf_0().read().bits(),
