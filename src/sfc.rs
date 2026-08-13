@@ -82,6 +82,31 @@ pub struct BusConfig {
     pub write_instruction: u8,
 }
 
+/// Writable SPI NOR status register selected by its standard command pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlashStatusRegister {
+    /// Status register 1 (`RDSR1`/`WRSR1`).
+    One,
+    /// Status register 2 (`RDSR2`/`WRSR2`).
+    Two,
+}
+
+impl FlashStatusRegister {
+    const fn read_command(self) -> u8 {
+        match self {
+            Self::One => 0x05,
+            Self::Two => 0x35,
+        }
+    }
+
+    const fn write_command(self) -> u8 {
+        match self {
+            Self::One => 0x01,
+            Self::Two => 0x31,
+        }
+    }
+}
+
 impl Default for BusConfig {
     fn default() -> Self {
         Self {
@@ -94,6 +119,43 @@ impl Default for BusConfig {
             write_instruction: 0x02, // Standard page program
         }
     }
+}
+
+const fn command_config_bits(
+    select_cs1: bool,
+    address_enable: bool,
+    data_enable: bool,
+    read: bool,
+    data_len: usize,
+) -> u32 {
+    let mut config = 1;
+    if select_cs1 {
+        config |= 1 << 1;
+    }
+    if address_enable {
+        config |= 1 << 3;
+    }
+    if data_enable {
+        config |= 1 << 7;
+        if read {
+            config |= 1 << 8;
+        }
+        config |= ((data_len.saturating_sub(1) as u32) & 0x3f) << 9;
+    }
+    config
+}
+
+const fn validate_program_chunk(flash_offset: u32, length: usize) -> Result<(), SfcError> {
+    const COMMAND_BUFFER_SIZE: usize = 64;
+    const NOR_PAGE_SIZE: usize = 256;
+
+    if length == 0 || length > COMMAND_BUFFER_SIZE {
+        return Err(SfcError::InvalidProgramLength);
+    }
+    if (flash_offset as usize & (NOR_PAGE_SIZE - 1)) + length > NOR_PAGE_SIZE {
+        return Err(SfcError::ProgramCrossesPage);
+    }
+    Ok(())
 }
 
 /// SFC driver.
@@ -113,6 +175,108 @@ impl<'d> SfcDriver<'d> {
     fn regs(&self) -> &'static crate::soc::pac::sfc_cfg::RegisterBlock {
         // SAFETY: PAC peripheral pointer is a static physical MMIO address, always valid
         unsafe { &*SfcCfg::ptr() }
+    }
+
+    fn wait_command(&self) -> Result<(), SfcError> {
+        const COMMAND_POLL_LIMIT: usize = 1_000_000;
+
+        for _ in 0..COMMAND_POLL_LIMIT {
+            if !self.regs().cmd_config().read().start().bit_is_set() {
+                return Ok(());
+            }
+            core::hint::spin_loop();
+        }
+        Err(SfcError::Timeout)
+    }
+
+    fn issue_status_command(&self, instruction: u8, write_data: Option<u8>) -> Result<(), SfcError> {
+        let r = self.regs();
+        if let Some(value) = write_data {
+            unsafe { r.cmd_databuf_0().write(|w| w.bits(value as u32)) };
+        }
+        unsafe { r.cmd_ins().write(|w| w.bits(instruction as u32)) };
+
+        // CS1 owns the external flash. A one-byte write has data_en set with
+        // data_cnt=0; the command-only 0x50 deliberately has no data phase.
+        let config = command_config_bits(true, false, write_data.is_some(), false, 1);
+        unsafe { r.cmd_config().write(|w| w.bits(config)) };
+        self.wait_command()
+    }
+
+    fn read_status(&self, register: FlashStatusRegister) -> Result<u8, SfcError> {
+        let r = self.regs();
+        unsafe { r.cmd_ins().write(|w| w.bits(register.read_command() as u32)) };
+        let config = command_config_bits(true, false, true, true, 1);
+        unsafe { r.cmd_config().write(|w| w.bits(config)) };
+        self.wait_command()?;
+        Ok(r.cmd_databuf_0().read().bits() as u8)
+    }
+
+    fn wait_flash_ready(&self) -> Result<(), SfcError> {
+        const READY_POLL_LIMIT: usize = 100_000;
+
+        for _ in 0..READY_POLL_LIMIT {
+            if self.read_status(FlashStatusRegister::One)? & 1 == 0 {
+                return Ok(());
+            }
+            core::hint::spin_loop();
+        }
+        Err(SfcError::Timeout)
+    }
+
+    /// Volatile-write one SPI NOR status register and verify the new value.
+    ///
+    /// The `0x50` volatile-write-enable command and the following WRSR command
+    /// are emitted as one indivisible controller sequence. SPI NOR forbids any
+    /// intervening command, including a readiness poll. Callers must provide
+    /// external exclusion for the complete operation.
+    pub fn write_volatile_status(
+        &mut self,
+        register: FlashStatusRegister,
+        value: u8,
+    ) -> Result<(), SfcError> {
+        self.wait_flash_ready()?;
+
+        self.issue_status_command(0x50, None)?;
+        self.issue_status_command(register.write_command(), Some(value))?;
+        self.wait_flash_ready()?;
+
+        let mask = match register {
+            FlashStatusRegister::One => 0x7c,
+            FlashStatusRegister::Two => 0x42,
+        };
+        if self.read_status(register)? & mask == value & mask {
+            Ok(())
+        } else {
+            Err(SfcError::StatusVerify)
+        }
+    }
+
+    /// Program at most one 64-byte command-buffer chunk within one NOR page.
+    ///
+    /// `flash_offset` is relative to the start of the external flash, not the
+    /// CPU XIP address. The caller must ensure the destination is erased and
+    /// must externally exclude all other SFC command users.
+    pub fn program_chunk(&mut self, flash_offset: u32, data: &[u8]) -> Result<(), SfcError> {
+        validate_program_chunk(flash_offset, data.len())?;
+
+        self.wait_flash_ready()?;
+        self.issue_status_command(0x06, None)?;
+
+        let r = self.regs();
+        for (index, chunk) in data.chunks(4).enumerate() {
+            let mut bytes = [0u8; 4];
+            bytes[..chunk.len()].copy_from_slice(chunk);
+            Self::write_databuf(r, index, u32::from_le_bytes(bytes));
+        }
+        unsafe {
+            r.cmd_ins().write(|w| w.bits(0x02));
+            r.cmd_addr().write(|w| w.bits(flash_offset));
+        }
+        let config = command_config_bits(true, true, true, false, data.len());
+        unsafe { r.cmd_config().write(|w| w.bits(config)) };
+        self.wait_command()?;
+        self.wait_flash_ready()
     }
 
     // ── Global configuration ───────────────────────────────────────
@@ -300,12 +464,7 @@ impl<'d> SfcDriver<'d> {
         }
 
         // Build command config
-        let mut cmd_cfg: u32 = 0;
-        cmd_cfg |= 0x01; // start
-        if address_enable {
-            cmd_cfg |= 1 << 2; // addr_en
-        }
-        cmd_cfg |= 0 << 17; // mem_if_type = Standard
+        let cmd_cfg = command_config_bits(false, address_enable, false, false, 0);
 
         unsafe {
             r.cmd_config().write(|w| w.bits(cmd_cfg));
@@ -357,15 +516,7 @@ impl<'d> SfcDriver<'d> {
         }
 
         // Build command config
-        let mut cmd_cfg: u32 = 0;
-        cmd_cfg |= 0x01; // start
-        cmd_cfg |= 1 << 2; // addr_en
-        cmd_cfg |= 1 << 7; // data_en
-        if read {
-            cmd_cfg |= 1 << 8; // rw = read
-        }
-        cmd_cfg |= (((data_len.saturating_sub(1)) as u32) & 0x3F) << 9; // data_cnt
-        cmd_cfg |= 0 << 17; // mem_if_type = Standard
+        let cmd_cfg = command_config_bits(false, true, true, read, data_len);
 
         unsafe {
             r.cmd_config().write(|w| w.bits(cmd_cfg));
@@ -500,7 +651,7 @@ impl<'d> SfcDriver<'d> {
 }
 
 /// SFC operation error.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
 pub enum SfcError {
@@ -511,6 +662,12 @@ pub enum SfcError {
     /// A `write_data` slice longer than the 64-byte command data buffer was passed
     /// — rejected rather than silently truncated to the first 64 bytes.
     BufferTooLong,
+    /// A status-register write completed but readback did not match.
+    StatusVerify,
+    /// A command-buffer program request was empty or larger than 64 bytes.
+    InvalidProgramLength,
+    /// A program request crossed a 256-byte SPI NOR page boundary.
+    ProgramCrossesPage,
 }
 
 // ── Tests ──────────────────────────────────────────────────────
@@ -741,6 +898,28 @@ mod tests {
         assert_eq!(encode(0), 0); // saturating_sub keeps 0 (empty)
         assert_eq!(encode(1), 0); // 1 byte → count 0
         assert_eq!(encode(64), 63); // full buffer → max 6-bit value
+    }
+
+    #[test]
+    fn command_config_uses_pac_field_offsets() {
+        assert_eq!(command_config_bits(false, false, false, false, 0), 1);
+        assert_eq!(command_config_bits(true, false, false, false, 0), 1 | (1 << 1));
+        assert_eq!(command_config_bits(false, true, false, false, 0), 1 | (1 << 3));
+        assert_eq!(command_config_bits(false, false, true, true, 1), 1 | (1 << 7) | (1 << 8));
+        assert_eq!(
+            command_config_bits(true, true, true, false, 64),
+            1 | (1 << 1) | (1 << 3) | (1 << 7) | (63 << 9)
+        );
+    }
+
+    #[test]
+    fn program_chunk_validation_matches_controller_and_nor_boundaries() {
+        assert_eq!(validate_program_chunk(0x100, 1), Ok(()));
+        assert_eq!(validate_program_chunk(0x1c0, 64), Ok(()));
+        assert_eq!(validate_program_chunk(0x1ff, 1), Ok(()));
+        assert_eq!(validate_program_chunk(0x100, 0), Err(SfcError::InvalidProgramLength));
+        assert_eq!(validate_program_chunk(0x100, 65), Err(SfcError::InvalidProgramLength));
+        assert_eq!(validate_program_chunk(0x1e0, 64), Err(SfcError::ProgramCrossesPage));
     }
 
     #[test]
