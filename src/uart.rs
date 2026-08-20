@@ -317,13 +317,12 @@ impl<T: UartInstance> Uart<'_, T> {
     /// Read one byte, or `None` if this UART's RX FIFO is empty.
     pub fn read_byte(&self) -> Option<u8> {
         let r = uart_regs(T::PORT);
-        // Gate on the RX FIFO *count* (0x4c), not the `fifo_status.rx_fifo_empty`
-        // bit. The vendor `hal_uart_v151` polls `rx_fifo_cnt` to decide whether to
-        // read `data` (0x04), and on silicon the `rx_fifo_empty` status bit does not
-        // track a single-byte pop (gating on it loops forever / re-reads a stale
-        // byte — the cause of the long-broken `uart1_loopback`). `rx_fifo_cnt`
-        // decrements correctly as each `data` read drains the FIFO.
-        if r.rx_fifo_cnt().read().bits() == 0 { None } else { Some(r.data().read().bits() as u8) }
+        // `LINE_STATUS.data_available` is the UART's authoritative receive-data
+        // indication. On WS63 UART0, `RX_FIFO_CNT` can remain zero while the FIFO
+        // is full (`RX_FIFO_WRITE` reports level 64), so gating on the count loses
+        // every host-to-target byte. The FIFO-empty bit is also unsuitable for a
+        // single-byte pop on this IP revision.
+        if r.line_status().read().data_available().bit_is_clear() { None } else { Some(r.data().read().bits() as u8) }
     }
 
     /// Block until this UART's TX FIFO is fully drained.
