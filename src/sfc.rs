@@ -168,6 +168,15 @@ const fn validate_command_buffer(length: usize) -> Result<(), SfcError> {
     }
 }
 
+#[inline(always)]
+const fn validate_erase_sector_4k(flash_offset: u32) -> Result<(), SfcError> {
+    if flash_offset & 0x0fff == 0 {
+        Ok(())
+    } else {
+        Err(SfcError::InvalidEraseRange)
+    }
+}
+
 /// SFC driver.
 pub struct SfcDriver<'d> {
     _sfc: SfcCfg<'d>,
@@ -347,6 +356,30 @@ impl<'d> SfcDriver<'d> {
             destination.copy_from_slice(&bytes[..destination.len()]);
         }
         Ok(())
+    }
+
+    /// Erase one aligned 4 KiB SPI NOR sector.
+    ///
+    /// `flash_offset` is relative to the external flash. The caller must prove
+    /// ownership of the complete sector, exclude every other SFC command user,
+    /// and prevent flash-resident interrupt handlers while this runs. The
+    /// command path executes from SRAM and returns only after WIP clears.
+    #[cfg_attr(target_arch = "riscv32", unsafe(link_section = ".sram_text.sfc"))]
+    #[inline(never)]
+    pub fn erase_sector_4k(&mut self, flash_offset: u32) -> Result<(), SfcError> {
+        validate_erase_sector_4k(flash_offset)?;
+        self.wait_flash_ready()?;
+        self.issue_status_command(0x06, None)?;
+
+        let r = self.regs();
+        unsafe {
+            r.cmd_ins().write(|w| w.bits(0x20));
+            r.cmd_addr().write(|w| w.bits(flash_offset));
+            r.cmd_config()
+                .write(|w| w.bits(command_config_bits(true, true, false, false, 0)));
+        }
+        self.wait_command()?;
+        self.wait_flash_ready()
     }
 
     // ── Global configuration ───────────────────────────────────────
@@ -742,6 +775,8 @@ pub enum SfcError {
     InvalidProgramLength,
     /// A program request crossed a 256-byte SPI NOR page boundary.
     ProgramCrossesPage,
+    /// A sector erase request was not aligned to the 4 KiB erase geometry.
+    InvalidEraseRange,
 }
 
 // ── Tests ──────────────────────────────────────────────────────
@@ -994,6 +1029,16 @@ mod tests {
         assert_eq!(validate_program_chunk(0x100, 0), Err(SfcError::InvalidProgramLength));
         assert_eq!(validate_program_chunk(0x100, 65), Err(SfcError::InvalidProgramLength));
         assert_eq!(validate_program_chunk(0x1e0, 64), Err(SfcError::ProgramCrossesPage));
+    }
+
+    #[test]
+    fn erase_sector_validation_requires_4k_alignment() {
+        assert_eq!(validate_erase_sector_4k(0), Ok(()));
+        assert_eq!(validate_erase_sector_4k(0x3fc000), Ok(()));
+        assert_eq!(
+            validate_erase_sector_4k(0x3fc001),
+            Err(SfcError::InvalidEraseRange)
+        );
     }
 
     #[test]

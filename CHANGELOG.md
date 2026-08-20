@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.0-alpha.9] - 2026-08-20
+
+### Added
+
+- Add an unstable, SRAM-resident WS63 SFC 4 KiB sector erase transaction with
+  alignment validation, bounded command completion, and WIP polling for
+  linker-bounded runtime storage maintenance.
+
 ## [0.7.0-alpha.8] - 2026-08-13
 
 ### Added
