@@ -662,10 +662,17 @@ mod tests {
     use super::sckdv;
     use crate::soc::chip::SPI_CLOCK_HZ;
 
+    #[cfg(feature = "chip-ws63")]
+    const ONE_MHZ_DIVIDER: u32 = 160;
+    #[cfg(feature = "chip-bs21")]
+    const ONE_MHZ_DIVIDER: u32 = 32;
+
     #[test]
     fn test_sckdv_basic() {
-        // 160 MHz / 1 MHz = 160 (SDK writes the divisor directly, no /2, no -1).
-        assert_eq!(sckdv(SPI_CLOCK_HZ, 1_000_000), 160);
+        // Source clocks differ by chip. The divider has neither /2 nor -1.
+        assert_eq!(sckdv(160_000_000, 1_000_000), 160);
+        assert_eq!(sckdv(32_000_000, 1_000_000), 32);
+        assert_eq!(sckdv(SPI_CLOCK_HZ, 1_000_000), ONE_MHZ_DIVIDER);
     }
 
     #[test]
@@ -685,7 +692,8 @@ mod tests {
 
     #[test]
     fn test_sckdv_clamps_at_max() {
-        assert_eq!(sckdv(SPI_CLOCK_HZ, 1000), 0xFFFE);
+        // 100 Hz exceeds the divider range with either 32 or 160 MHz input.
+        assert_eq!(sckdv(SPI_CLOCK_HZ, 100), 0xFFFE);
     }
 
     #[test]
@@ -693,14 +701,14 @@ mod tests {
         use super::SpiHz;
         // 0 and frequencies whose divider leaves [2, 0xFFFE] are rejected.
         assert!(SpiHz::try_from_hz(0).is_none());
-        // Too high: > SPI_CLOCK_HZ/2 (=80 MHz) → div < 2.
+        // Too high: > SPI_CLOCK_HZ/2 → div < 2.
         assert!(SpiHz::try_from_hz(SPI_CLOCK_HZ / 2 + 1).is_none());
         assert!(SpiHz::try_from_hz(SPI_CLOCK_HZ).is_none());
-        // Too low: div > 0xFFFE (1 Hz → 160 000 000 div).
+        // Too low: div > 0xFFFE at 1 Hz for both supported clocks.
         assert!(SpiHz::try_from_hz(1).is_none());
-        // In range: 1 MHz → div 160; the default const agrees.
+        // In range: the default const agrees with this chip's source clock.
         assert_eq!(SpiHz::try_from_hz(1_000_000).unwrap().hz(), 1_000_000);
-        assert_eq!(SpiHz::ONE_MHZ.to_sckdv(), 160);
+        assert_eq!(SpiHz::ONE_MHZ.to_sckdv(), ONE_MHZ_DIVIDER);
         // Exactly the edges resolve to the min/max even divider.
         assert_eq!(SpiHz::try_from_hz(SPI_CLOCK_HZ / 2).unwrap().to_sckdv(), 2);
     }

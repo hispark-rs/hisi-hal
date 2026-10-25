@@ -1337,6 +1337,9 @@ impl DmaChannelConfig {
 mod tests {
     use super::*;
 
+    // These request identities exist only in the WS63 peripheral-DMA backend.
+    // Keep the generic controller/configuration tests below enabled for BS2X.
+    #[cfg(feature = "chip-ws63")]
     #[test]
     fn test_dma_direction_tx_rx_distinct() {
         // TX and RX directions must map to different peripheral IDs
@@ -1346,6 +1349,7 @@ mod tests {
     // The request IDs below are the HAL_DMA_HANDSHAKING_* indices from fbb_ws63
     // dma_porting.h (the single source of truth) — NOT a fabricated 0..11 run.
 
+    #[cfg(feature = "chip-ws63")]
     #[test]
     fn test_dma_peripheral_spi_handshaking_ids() {
         // SPI_MS0 = 7/8, SPI_MS1 = 13/14.
@@ -1357,6 +1361,7 @@ mod tests {
         assert_eq!(DmaPeripheral::Spi1Rx.request_id(), 14);
     }
 
+    #[cfg(feature = "chip-ws63")]
     #[test]
     fn test_dma_peripheral_uart_handshaking_ids() {
         // UART0=UART_L (1/2), UART1=UART_H0 (3/4), UART2=UART_H1 (5/6).
@@ -1368,12 +1373,14 @@ mod tests {
         assert_eq!(DmaPeripheral::Uart2Rx.request_id(), 6);
     }
 
+    #[cfg(feature = "chip-ws63")]
     #[test]
     fn test_dma_peripheral_i2s_handshaking_ids() {
         assert_eq!(DmaPeripheral::I2sTx.request_id(), 11);
         assert_eq!(DmaPeripheral::I2sRx.request_id(), 12);
     }
 
+    #[cfg(feature = "chip-ws63")]
     #[test]
     fn test_dma_peripheral_ids_fit_4bit_field() {
         // src/dst_peripheral is a 4-bit channel-config field.
@@ -1389,6 +1396,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "chip-ws63")]
     #[test]
     fn test_dma_channel_config_peripheral_wiring() {
         // mem_to_peripheral / peripheral_to_mem set flow control + the handshaking
