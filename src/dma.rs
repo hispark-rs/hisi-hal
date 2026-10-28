@@ -765,12 +765,13 @@ impl<'d, SRC, DST> Transfer<'d, SRC, DST> {
         let ch = this.channel.logical;
         let timed_out = this.driver.channel_enabled_raw(ch);
         if timed_out {
-            quiesce_channel(&mut this.driver, ch);
+            let observation = quiesce_channel(&mut this.driver, ch);
             // SAFETY: the outer guard is ManuallyDrop; each owner is read exactly
             // once and deliberately retained without invalidating the destination.
             return unsafe {
                 Err(DmaWaitError {
                     error: DmaError::Timeout,
+                    observation,
                     driver: core::ptr::read(&this.driver),
                     channel: core::ptr::read(&this.channel),
                     src: core::ptr::read(&this.src),
@@ -835,6 +836,7 @@ impl<'d, SRC, DST> DmaStartError<'d, SRC, DST> {
 #[instability::unstable]
 pub struct DmaWaitError<'d, SRC, DST> {
     error: DmaError,
+    observation: StopObservation,
     driver: ManuallyDrop<DmaDriver<'d, Dma0>>,
     channel: ManuallyDrop<DmaChannel>,
     src: ManuallyDrop<SRC>,
@@ -847,7 +849,7 @@ pub struct DmaWaitError<'d, SRC, DST> {
 
 impl<SRC, DST> core::fmt::Debug for DmaWaitError<'_, SRC, DST> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("DmaWaitError").field("error", &self.error).finish_non_exhaustive()
+        f.debug_struct("DmaWaitError").field("error", &self.error).field("observation", &self.observation).finish_non_exhaustive()
     }
 }
 
@@ -855,6 +857,11 @@ impl<'d, SRC, DST> DmaWaitError<'d, SRC, DST> {
     /// The reason waiting failed.
     pub const fn error(&self) -> DmaError {
         self.error
+    }
+
+    /// Status observed before disable; this is not proof of bus drain.
+    pub const fn stop_observation(&self) -> StopObservation {
+        self.observation
     }
 
     /// Recover retained resources and invalidate the destination after external
@@ -890,23 +897,48 @@ impl<SRC, DST> Drop for Transfer<'_, SRC, DST> {
 
 // ── Channel teardown helpers (cancel-then-quiesce) ───────────────────────────
 
-/// Halt a DMA channel, drain its in-flight beats (the `active`/FIFO-busy bit), then
-/// clear `ch_enable`. The poll is bounded by `DMA_WAIT_LOOPS`; on exhaustion the
-/// function still disables the channel. No posted-write drain proof is available.
-///
-/// Factored as a free function over `&mut DmaDriver` so both the mem-to-mem
-/// [`Transfer`] and the peripheral [`PeripheralTransfer`] share one teardown path.
-fn quiesce_channel<T: DmaInstance>(driver: &mut DmaDriver<'_, T>, channel: u8) {
-    driver.halt_channel_raw(channel);
-    let mut n = DMA_WAIT_LOOPS;
-    while driver.channel_active_raw(channel) {
-        if n == 0 {
-            break;
+/// Active-bit observation from a bounded stop attempt. Neither variant proves
+/// that posted transactions have reached their destination.
+#[instability::unstable]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum StopObservation {
+    /// The active status bit was observed clear before disabling the channel.
+    ActiveClear,
+    /// The active status bit stayed set through the finite poll budget.
+    ActiveDeadline,
+}
+
+trait StopRegisters {
+    fn halt(&mut self);
+    fn active(&mut self) -> bool;
+    fn disable(&mut self);
+}
+
+fn observe_stop(io: &mut impl StopRegisters, mut remaining: u32) -> StopObservation {
+    io.halt();
+    let result = loop {
+        if !io.active() {
+            break StopObservation::ActiveClear;
         }
-        n -= 1;
+        if remaining == 0 {
+            break StopObservation::ActiveDeadline;
+        }
+        remaining -= 1;
         core::hint::spin_loop();
+    };
+    io.disable();
+    result
+}
+
+fn quiesce_channel<T: DmaInstance>(driver: &mut DmaDriver<'_, T>, channel: u8) -> StopObservation {
+    struct ChannelStop<'a, 'd, T: DmaInstance> { driver: &'a mut DmaDriver<'d, T>, channel: u8 }
+    impl<T: DmaInstance> StopRegisters for ChannelStop<'_, '_, T> {
+        fn halt(&mut self) { self.driver.halt_channel_raw(self.channel); }
+        fn active(&mut self) -> bool { self.driver.channel_active_raw(self.channel) }
+        fn disable(&mut self) { self.driver.disable_channel_raw(self.channel); }
     }
-    driver.disable_channel_raw(channel);
+    observe_stop(&mut ChannelStop { driver, channel }, DMA_WAIT_LOOPS)
 }
 
 /// Cancel-then-quiesce for a peripheral-paced transfer: clear the peripheral's
@@ -917,7 +949,7 @@ fn quiesce_channel<T: DmaInstance>(driver: &mut DmaDriver<'_, T>, channel: u8) {
 #[cfg(feature = "chip-ws63")]
 fn cancel_then_quiesce(peri_dis: &mut PeriDmaCtl, driver: &mut DmaDriver<'_, Dma0>, channel: u8) {
     peri_dis.disable();
-    quiesce_channel(driver, channel);
+    let _ = quiesce_channel(driver, channel);
 }
 
 // ── Peripheral-paced DMA (hisi-hal#6 / 0.5.1) ──────────────────────────
@@ -1442,6 +1474,7 @@ mod tests {
         fn retained(drops: &Arc<AtomicUsize>) -> DmaWaitError<'static, Counted, Counted> {
             DmaWaitError {
                 error: DmaError::Timeout,
+                observation: StopObservation::ActiveDeadline,
                 driver: ManuallyDrop::new(DmaDriver::new_for_test()),
                 channel: ManuallyDrop::new(DmaChannel { logical: 0 }),
                 src: ManuallyDrop::new(Counted(drops.clone())),
@@ -1451,12 +1484,30 @@ mod tests {
             }
         }
         let drops = Arc::new(AtomicUsize::new(0));
-        drop(retained(&drops));
+        let error = retained(&drops);
+        assert_eq!(error.stop_observation(), StopObservation::ActiveDeadline);
+        drop(error);
         assert_eq!(drops.load(Ordering::SeqCst), 0);
         // SAFETY: host-only synthetic resources were never given to a DMA engine.
         let (_, _, _, src, dst) = unsafe { retained(&drops).into_parts() };
         drop((src, dst));
         assert_eq!(drops.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn stop_observation_reports_both_outcomes_and_always_disables() {
+        struct Mock { active: std::vec::Vec<bool>, events: std::vec::Vec<&'static str> }
+        impl StopRegisters for Mock {
+            fn halt(&mut self) { self.events.push("halt"); }
+            fn active(&mut self) -> bool { self.events.push("active"); self.active.remove(0) }
+            fn disable(&mut self) { self.events.push("disable"); }
+        }
+        let mut idle = Mock { active: std::vec![true, false], events: std::vec![] };
+        assert_eq!(observe_stop(&mut idle, 2), StopObservation::ActiveClear);
+        assert_eq!(idle.events, ["halt", "active", "active", "disable"]);
+        let mut stuck = Mock { active: std::vec![true, true, true], events: std::vec![] };
+        assert_eq!(observe_stop(&mut stuck, 2), StopObservation::ActiveDeadline);
+        assert_eq!(stuck.events, ["halt", "active", "active", "active", "disable"]);
     }
 
     #[test]
