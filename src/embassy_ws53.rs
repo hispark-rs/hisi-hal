@@ -11,7 +11,7 @@ use crate::{
     tcxo::{TcxoDriver, TcxoError},
     timer::{TimerChannel, TimerDriver, TimerMode, TimerTicks},
 };
-use core::{cell::RefCell, task::Waker};
+use core::{cell::RefCell, num::NonZeroU32, task::Waker};
 use critical_section::Mutex;
 use embassy_time_driver::Driver;
 
@@ -21,6 +21,7 @@ pub const ALARM_IRQ: u32 = 54;
 pub const QUEUE_CAPACITY: usize = 16;
 const CHANNEL: TimerChannel = TimerChannel::Channel1;
 const COUNTS_PER_US: u64 = 32;
+const COUNTS_PER_TICK: NonZeroU32 = NonZeroU32::new(COUNTS_PER_US as u32).unwrap();
 const RETRY_COUNTS: u32 = 32_000; // at most1ms retry while TCXO cannot supply fresh time
 const _: () = assert!(embassy_time_driver::TICK_HZ == 1_000_000, "WS53 Embassy requires tick-hz-1_000_000");
 
@@ -132,7 +133,7 @@ impl State {
         }
     }
     fn accept_ticks(&mut self, raw: u64) {
-        let ticks = raw / COUNTS_PER_US;
+        let ticks = crate::embassy_time_math::counter_ticks(raw, COUNTS_PER_TICK);
         if ticks < self.last {
             self.health = ClockStatus::Backwards;
         } else {
@@ -156,14 +157,7 @@ struct Ws53TimeDriver {
 fn alarm_counts(at: u64, now: u64, retry: bool) -> TimerTicks {
     // Hardware periods are segments of the retained absolute deadline, not a
     // truncated deadline. u64::MAX is a real deadline, never an empty sentinel.
-    let us = at.saturating_sub(now);
-    let count = if us == 0 {
-        1
-    } else if us > u64::from(u32::MAX) / COUNTS_PER_US {
-        u32::MAX
-    } else {
-        (us * COUNTS_PER_US) as u32
-    };
+    let count = crate::embassy_time_math::alarm_counts(at, now, COUNTS_PER_TICK);
     TimerTicks::from_count(if retry { count.min(RETRY_COUNTS) } else { count }).unwrap()
 }
 fn stop(timer: &mut TimerDriver<'_>) {

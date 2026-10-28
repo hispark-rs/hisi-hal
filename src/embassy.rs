@@ -21,6 +21,7 @@
 //!   [`ALARM_IRQ`]) to [`on_alarm_interrupt`] and has enabled global interrupts.
 
 use core::cell::RefCell;
+use core::num::NonZeroU32;
 use core::task::Waker;
 
 use critical_section::{CriticalSection, Mutex};
@@ -34,6 +35,10 @@ use crate::soc::chip::TIMER_CLOCK_HZ;
 const TCXO_HZ: u64 = crate::soc::chip::TCXO_HZ as u64;
 /// embassy-time tick rate — MUST match the app's `embassy-time/tick-hz-*` feature.
 const TICK_HZ: u64 = 1_000_000;
+const _: () = assert!(TCXO_HZ.is_multiple_of(TICK_HZ) && TCXO_HZ >= TICK_HZ);
+const _: () = assert!((TIMER_CLOCK_HZ as u64).is_multiple_of(TICK_HZ) && TIMER_CLOCK_HZ as u64 >= TICK_HZ);
+const TCXO_COUNTS_PER_TICK: NonZeroU32 = NonZeroU32::new((TCXO_HZ / TICK_HZ) as u32).unwrap();
+const TIMER_COUNTS_PER_TICK: NonZeroU32 = NonZeroU32::new((TIMER_CLOCK_HZ as u64 / TICK_HZ) as u32).unwrap();
 /// TIMER channel reserved for embassy-time alarms.
 const ALARM_CH: usize = 0;
 
@@ -60,7 +65,7 @@ fn now_ticks() -> u64 {
     let c3 = r.tcxo_count3().read().bits() as u64;
     let count = (c3 << 48) | (c2 << 32) | (c1 << 16) | c0;
     // TCXO crystal counter -> 1 MHz ticks (TCXO_HZ is per-chip from soc::chip).
-    count * TICK_HZ / TCXO_HZ
+    crate::embassy_time_math::counter_ticks(count, TCXO_COUNTS_PER_TICK)
 }
 
 struct HisiTimeDriver {
@@ -86,17 +91,11 @@ impl HisiTimeDriver {
         }
 
         let now = now_ticks();
-        let delta_ticks = at.saturating_sub(now).max(1);
-        // ticks(µs) -> TIMER counts at the TIMER clock (TCXO crystal), clamped to u32.
-        let mut counts = delta_ticks * TIMER_CLOCK_HZ as u64 / TICK_HZ;
-        if counts == 0 {
-            counts = 1;
-        }
-        if counts > u32::MAX as u64 {
-            counts = u32::MAX as u64;
-        }
+        // Keep far deadlines as bounded hardware segments without overflowing.
+        let delta = at.saturating_sub(now).max(1);
+        let counts = crate::embassy_time_math::alarm_counts(delta, 0, TIMER_COUNTS_PER_TICK);
         unsafe {
-            r.timer0_load_count(ALARM_CH).write(|w| w.bits(counts as u32));
+            r.timer0_load_count(ALARM_CH).write(|w| w.bits(counts));
             // Raw control = 0x1: enable (bit0), mode bits = 0b00 (one-shot in HW —
             // do NOT use the PAC's typed `.mode()`, whose enum is inverted vs the
             // dw_apb timer), int_mask (bit3) = 0 = unmasked. Verified vs fbb SDKs.
