@@ -704,20 +704,21 @@ impl<'d> DmaDriver<'d, Dma0> {
         let ch = channel.logical;
         self.configure_channel_raw(ch, src_ptr as u32, dst_ptr as u32, transfer_size, &cfg);
 
-        Ok(Transfer { driver: self, channel, src, dst, dst_addr: dst_ptr as usize, bytes })
+        Ok(Transfer { driver: ManuallyDrop::new(self), channel: ManuallyDrop::new(channel),
+            src: ManuallyDrop::new(src), dst: ManuallyDrop::new(dst), dst_addr: dst_ptr as usize, bytes })
     }
 }
 
 /// An in-flight DMA transfer that **owns the driver and both buffers**. Reclaim them
-/// with [`wait`](Self::wait); dropping the guard early attempts to abort the channel.
+/// with [`wait`](Self::wait); dropping early attempts to abort and retains resources.
 /// A static buffer bound addresses forgotten borrowed stack buffers, but bounded
 /// cancellation and noncoherent cache-line ownership remain unverified.
 #[instability::unstable]
 pub struct Transfer<'d, SRC, DST> {
-    driver: DmaDriver<'d, Dma0>,
-    channel: DmaChannel,
-    src: SRC,
-    dst: DST,
+    driver: ManuallyDrop<DmaDriver<'d, Dma0>>,
+    channel: ManuallyDrop<DmaChannel>,
+    src: ManuallyDrop<SRC>,
+    dst: ManuallyDrop<DST>,
     // Only read by the chip-ws63 cache maintenance in `wait()`; BS2X DMA is coherent
     // here, so these are unused there.
     #[cfg_attr(not(feature = "chip-ws63"), allow(dead_code))]
@@ -770,10 +771,10 @@ impl<'d, SRC, DST> Transfer<'d, SRC, DST> {
             return unsafe {
                 Err(DmaWaitError {
                     error: DmaError::Timeout,
-                    driver: ManuallyDrop::new(core::ptr::read(&this.driver)),
-                    channel: ManuallyDrop::new(core::ptr::read(&this.channel)),
-                    src: ManuallyDrop::new(core::ptr::read(&this.src)),
-                    dst: ManuallyDrop::new(core::ptr::read(&this.dst)),
+                    driver: core::ptr::read(&this.driver),
+                    channel: core::ptr::read(&this.channel),
+                    src: core::ptr::read(&this.src),
+                    dst: core::ptr::read(&this.dst),
                     dst_addr: this.dst_addr,
                     bytes: this.bytes,
                 })
@@ -787,10 +788,10 @@ impl<'d, SRC, DST> Transfer<'d, SRC, DST> {
         // SAFETY: `this` is ManuallyDrop (its Drop never runs) and each field is read
         // exactly once, so there is no double-read or double-drop.
         unsafe {
-            let driver = core::ptr::read(&this.driver);
-            let channel = core::ptr::read(&this.channel);
-            let src = core::ptr::read(&this.src);
-            let dst = core::ptr::read(&this.dst);
+            let driver = ManuallyDrop::into_inner(core::ptr::read(&this.driver));
+            let channel = ManuallyDrop::into_inner(core::ptr::read(&this.channel));
+            let src = ManuallyDrop::into_inner(core::ptr::read(&this.src));
+            let dst = ManuallyDrop::into_inner(core::ptr::read(&this.dst));
             Ok((driver, channel, src, dst))
         }
     }
@@ -874,8 +875,9 @@ impl<'d, SRC, DST> DmaWaitError<'d, SRC, DST> {
 }
 
 impl<SRC, DST> Drop for Transfer<'_, SRC, DST> {
-    /// Attempt to stop the channel before the buffers are dropped. Bounded
-    /// polling does not prove the engine has stopped accessing them.
+    /// Attempt to stop the channel and retain all resources. Bounded polling
+    /// does not prove the engine has stopped accessing them; there is no recovery
+    /// handle after early drop.
     ///
     /// Uses `quiesce_channel`: halt, then drain the `active` (FIFO/bus) bit, then
     /// clear `ch_enable` — clearing `ch_enable` mid-burst (the old behaviour) could
@@ -1237,9 +1239,9 @@ impl<'d> DmaDriver<'d, Dma0> {
         self.configure_channel_raw(ch, src_ptr as u32, peri_data_addr as u32, size, &cfg);
 
         Ok(PeripheralTransfer {
-            driver: self,
-            channel,
-            buf: src,
+            driver: ManuallyDrop::new(self),
+            channel: ManuallyDrop::new(channel),
+            buf: ManuallyDrop::new(src),
             dir: DmaDirection::Tx,
             mem_addr: src_ptr as usize,
             bytes,
@@ -1301,9 +1303,9 @@ impl<'d> DmaDriver<'d, Dma0> {
         self.configure_channel_raw(ch, peri_data_addr as u32, dst_ptr as u32, size, &cfg);
 
         Ok(PeripheralTransfer {
-            driver: self,
-            channel,
-            buf: dst,
+            driver: ManuallyDrop::new(self),
+            channel: ManuallyDrop::new(channel),
+            buf: ManuallyDrop::new(dst),
             dir: DmaDirection::Rx,
             mem_addr: dst_ptr as usize,
             bytes,
@@ -1323,9 +1325,9 @@ impl<'d> DmaDriver<'d, Dma0> {
 #[cfg(feature = "chip-ws63")]
 #[instability::unstable]
 pub struct PeripheralTransfer<'d, BUF> {
-    driver: DmaDriver<'d, Dma0>,
-    channel: DmaChannel,
-    buf: BUF,
+    driver: ManuallyDrop<DmaDriver<'d, Dma0>>,
+    channel: ManuallyDrop<DmaChannel>,
+    buf: ManuallyDrop<BUF>,
     dir: DmaDirection,
     mem_addr: usize,
     bytes: usize,
@@ -1364,11 +1366,8 @@ impl<'d, BUF> PeripheralTransfer<'d, BUF> {
         }
 
         if this.driver.channel_enabled_raw(ch) {
-            // Timed out: attempt cancellation before buffer/cache teardown. The
-            // bounded poll does not prove drain. Then invalidate the RX destination (the DMA may
-            // have written partial data) before the buffer drops. The two `&mut`
-            // field borrows are sequential (not simultaneous) so they reborrow
-            // `&mut *this` one at a time.
+            // Attempt cancellation without invalidating or releasing buffers;
+            // the bounded poll does not prove that the DMA bus is drained.
             this.peri_dis.disable();
             quiesce_channel(&mut this.driver, ch);
             // Keep the ManuallyDrop guard and all its resources retained; do not
@@ -1388,9 +1387,9 @@ impl<'d, BUF> PeripheralTransfer<'d, BUF> {
         // SAFETY: `this` is ManuallyDrop (its Drop never runs) and each field is read
         // exactly once, so there is no double-read or double-drop.
         unsafe {
-            let driver = core::ptr::read(&this.driver);
-            let channel = core::ptr::read(&this.channel);
-            let buf = core::ptr::read(&this.buf);
+            let driver = ManuallyDrop::into_inner(core::ptr::read(&this.driver));
+            let channel = ManuallyDrop::into_inner(core::ptr::read(&this.channel));
+            let buf = ManuallyDrop::into_inner(core::ptr::read(&this.buf));
             Ok((driver, channel, buf))
         }
     }
@@ -1399,7 +1398,8 @@ impl<'d, BUF> PeripheralTransfer<'d, BUF> {
 #[cfg(feature = "chip-ws63")]
 impl<BUF> Drop for PeripheralTransfer<'_, BUF> {
     /// Cancel-then-quiesce: clear the peripheral DMA-enable, halt, drain `active`,
-    /// disable. The bounded poll does not establish DMA bus drain.
+    /// disable and retain the driver, channel and buffer. The bounded poll does
+    /// not establish DMA bus drain; no recovery handle remains after early drop.
     fn drop(&mut self) {
         cancel_then_quiesce(&mut self.peri_dis, &mut self.driver, self.channel.logical);
     }
@@ -1457,6 +1457,55 @@ mod tests {
         let (_, _, _, src, dst) = unsafe { retained(&drops).into_parts() };
         drop((src, dst));
         assert_eq!(drops.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn early_drop_retains_memory_buffers_even_when_stop_panics() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        struct Counted(Arc<AtomicUsize>);
+        impl Drop for Counted {
+            fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let result = std::panic::catch_unwind(|| {
+            let guard = Transfer {
+                driver: ManuallyDrop::new(DmaDriver::new_for_test()),
+                // Invalid channel forces a panic before host MMIO, testing unwind.
+                channel: ManuallyDrop::new(DmaChannel { logical: 4 }),
+                src: ManuallyDrop::new(Counted(drops.clone())),
+                dst: ManuallyDrop::new(Counted(drops.clone())),
+                dst_addr: 0,
+                bytes: 0,
+            };
+            drop(guard);
+        });
+        assert!(result.is_err());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(feature = "chip-ws63")]
+    #[test]
+    fn early_drop_retains_peripheral_buffer_even_when_stop_panics() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        struct Counted(Arc<AtomicUsize>);
+        impl Drop for Counted {
+            fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let result = std::panic::catch_unwind(|| {
+            let guard = PeripheralTransfer {
+                driver: ManuallyDrop::new(DmaDriver::new_for_test()),
+                channel: ManuallyDrop::new(DmaChannel { logical: 4 }),
+                buf: ManuallyDrop::new(Counted(drops.clone())),
+                dir: DmaDirection::Tx,
+                mem_addr: 0,
+                bytes: 0,
+                peri_dis: PeriDmaCtl::new(0, PeriKind::Uart, DmaDirection::Tx),
+            };
+            drop(guard);
+        });
+        assert!(result.is_err());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
     }
 
     // These request identities exist only in the WS63 peripheral-DMA backend.
