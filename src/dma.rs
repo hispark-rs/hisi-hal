@@ -633,9 +633,9 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// for its whole lifetime, returning a [`Transfer`] guard you [`wait`] to reclaim
     /// the driver + buffers.
     ///
-    /// Because the guard owns the buffers (and aborts the channel on `Drop`), a
-    /// use-after-free of an in-flight DMA region is **unrepresentable in safe code**:
-    /// the buffers cannot be touched, moved, or freed while the DMA reads/writes them.
+    /// Buffers must be owned or statically borrowed: forgetting the guard must
+    /// not let an in-flight DMA access a returned stack allocation. This bound
+    /// does not prove completion, bus drain, or cache-line exclusivity.
     /// The source cache lines are cleaned before launch and the destination
     /// invalidated on `wait()` (the WS63 core is non-coherent), so the cache
     /// maintenance lives inside the type rather than being a caller obligation.
@@ -644,6 +644,15 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// [`DMA_ALIGN`]-aligned. The transfer length is `min(src.len(), dst.len())` words.
     ///
     /// [`wait`]: Transfer::wait
+    ///
+    /// A borrowed stack allocation cannot be supplied:
+    /// ```compile_fail
+    /// # use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver};
+    /// fn borrowed<'a>(driver: DmaDriver<'static, Dma0>, channel: DmaChannel,
+    ///                 src: &'a [u32], dst: &'a mut [u32]) {
+    ///     let _guard = driver.start_mem_to_mem(channel, src, dst);
+    /// }
+    /// ```
     #[instability::unstable]
     pub fn start_mem_to_mem<SRC, DST>(
         mut self,
@@ -652,8 +661,8 @@ impl<'d> DmaDriver<'d, Dma0> {
         mut dst: DST,
     ) -> Result<Transfer<'d, SRC, DST>, DmaStartError<'d, SRC, DST>>
     where
-        SRC: ReadBuffer<Word = u32>,
-        DST: WriteBuffer<Word = u32>,
+        SRC: ReadBuffer<Word = u32> + 'static,
+        DST: WriteBuffer<Word = u32> + 'static,
     {
         // SAFETY: `src`/`dst` are moved into the returned Transfer and held until
         // wait() reclaims them, so these pointers stay valid for the whole transfer.
@@ -684,9 +693,9 @@ impl<'d> DmaDriver<'d, Dma0> {
 }
 
 /// An in-flight DMA transfer that **owns the driver and both buffers**. Reclaim them
-/// with [`wait`](Self::wait); dropping the guard early aborts the channel (so the DMA
-/// stops touching the buffers before they are freed). Owning the buffers is what makes
-/// a use-after-free of an active DMA region unrepresentable in safe code.
+/// with [`wait`](Self::wait); dropping the guard early attempts to abort the channel.
+/// A static buffer bound addresses forgotten borrowed stack buffers, but bounded
+/// cancellation and noncoherent cache-line ownership remain unverified.
 #[instability::unstable]
 pub struct Transfer<'d, SRC, DST> {
     driver: DmaDriver<'d, Dma0>,
@@ -719,10 +728,9 @@ impl<'d, SRC, DST> Transfer<'d, SRC, DST> {
     /// lines, and return the driver + both buffers. Consumes the guard, so no abort
     /// `Drop` runs.
     ///
-    /// On `DMA_WAIT_LOOPS` exhaustion (a wedged channel — rare for mem-to-mem, which
-    /// always self-completes) the channel is **quiesced** (halt → drain `active` →
-    /// disable) *before* the buffers are handed back, so the DMA engine is provably
-    /// stopped before the buffers can be freed. A wedged transfer is reported as
+    /// On `DMA_WAIT_LOOPS` exhaustion, halt, bounded active polling and disable
+    /// are attempted before buffers are handed back. The active poll can expire,
+    /// so DMA bus drain is not established. A wedged transfer is reported as
     /// [`DmaError::Timeout`] with the driver, channel token, and buffers returned.
     pub fn wait(self) -> DmaWaitResult<'d, SRC, DST> {
         // Skip the abort-on-drop: the transfer is completing normally.
@@ -814,20 +822,21 @@ impl<'d, SRC, DST> DmaWaitError<'d, SRC, DST> {
         self.error
     }
 
-    /// Recover the driver, claimed channel, and buffers after the channel has been
-    /// quiesced and the destination cache maintenance has run.
+    /// Recover the driver, claimed channel, and buffers after attempted
+    /// cancellation and cache maintenance. DMA bus drain is not yet established.
     pub fn into_parts(self) -> (DmaError, DmaDriver<'d, Dma0>, DmaChannel, SRC, DST) {
         (self.error, self.driver, self.channel, self.src, self.dst)
     }
 }
 
 impl<SRC, DST> Drop for Transfer<'_, SRC, DST> {
-    /// Abort the channel so the engine stops reading/writing the owned buffers before
-    /// they are dropped — the use-after-free guard for an early-dropped transfer.
+    /// Attempt to stop the channel before the buffers are dropped. Bounded
+    /// polling does not prove the engine has stopped accessing them.
     ///
     /// Uses `quiesce_channel`: halt, then drain the `active` (FIFO/bus) bit, then
     /// clear `ch_enable` — clearing `ch_enable` mid-burst (the old behaviour) could
-    /// let an outstanding bus write land after the buffer is freed.
+    /// let an outstanding bus write land after the buffer is freed. This sequence
+    /// has not established that all outstanding bus writes have drained.
     fn drop(&mut self) {
         quiesce_channel(&mut self.driver, self.channel.logical);
     }
@@ -836,10 +845,8 @@ impl<SRC, DST> Drop for Transfer<'_, SRC, DST> {
 // ── Channel teardown helpers (cancel-then-quiesce) ───────────────────────────
 
 /// Halt a DMA channel, drain its in-flight beats (the `active`/FIFO-busy bit), then
-/// clear `ch_enable`. This is the DesignWare quiesce sequence — clearing `ch_enable`
-/// mid-burst (the original `Drop`) could let an outstanding bus write land after the
-/// owned buffer is freed, a use-after-free window on the non-coherent core. The poll
-/// is bounded by `DMA_WAIT_LOOPS`.
+/// clear `ch_enable`. The poll is bounded by `DMA_WAIT_LOOPS`; on exhaustion the
+/// function still disables the channel. No posted-write drain proof is available.
 ///
 /// Factored as a free function over `&mut DmaDriver` so both the mem-to-mem
 /// [`Transfer`] and the peripheral [`PeripheralTransfer`] share one teardown path.
@@ -880,8 +887,7 @@ pub enum DmaError {
     TransferTooLarge,
     /// The channel did not auto-clear its enable bit within `DMA_WAIT_LOOPS` (a
     /// wedged transfer — e.g. a peripheral whose DMA-enable was never set, or a
-    /// handshake mismatch). The guard quiesced the channel before returning, so the
-    /// buffer is safe, but the transfer did not complete.
+    /// handshake mismatch). Cancellation was attempted, but drain is not proven.
     Timeout,
 }
 
@@ -1129,7 +1135,7 @@ impl<'d> DmaDriver<'d, Dma0> {
         peri_dis: PeriDmaCtl,
     ) -> Result<PeripheralTransfer<'d, SRC>, DmaError>
     where
-        SRC: ReadBuffer<Word = u8>,
+        SRC: ReadBuffer<Word = u8> + 'static,
     {
         let ch = channel.logical;
         // SAFETY: `src` is moved into the returned guard and held until wait(), so the
@@ -1178,7 +1184,7 @@ impl<'d> DmaDriver<'d, Dma0> {
         peri_dis: PeriDmaCtl,
     ) -> Result<PeripheralTransfer<'d, DST>, DmaError>
     where
-        DST: WriteBuffer<Word = u8>,
+        DST: WriteBuffer<Word = u8> + 'static,
     {
         let ch = channel.logical;
         // SAFETY: `dst` is moved into the returned guard and held until wait().
@@ -1210,13 +1216,12 @@ impl<'d> DmaDriver<'d, Dma0> {
 
 /// An in-flight peripheral-paced DMA transfer that **owns the driver, the channel
 /// token, and the single memory buffer**. Reclaim them with
-/// [`wait`](Self::wait); dropping the guard early runs cancel-then-quiesce: clear
-/// the peripheral DMA-enable, halt, drain `active`, disable — so neither the channel
-/// nor the peripheral keeps touching the buffer before it is freed.
+/// [`wait`](Self::wait); dropping the guard early attempts cancellation by clearing
+/// peripheral DMA-enable, halting, polling `active` and disabling the channel.
 ///
-/// Owning the buffer (by value, via `embedded_dma`) is what makes a use-after-free of
-/// an active DMA region unrepresentable in safe code: the buffer cannot be touched,
-/// moved, or freed while the DMA reads/writes it.
+/// The buffer must be owned or statically borrowed. This prevents a forgotten
+/// guard from leaving a borrowed stack allocation accessible to DMA, but does not
+/// prove cancellation drain, peripheral address validity or cache-line ownership.
 #[cfg(feature = "chip-ws63")]
 #[instability::unstable]
 pub struct PeripheralTransfer<'d, BUF> {
@@ -1243,9 +1248,8 @@ impl<'d, BUF> PeripheralTransfer<'d, BUF> {
     ///
     /// On `DMA_WAIT_LOOPS` exhaustion the channel is cancel-then-quiesced first, then
     /// [`Err(DmaError::Timeout)`](DmaError::Timeout) is returned (the driver, channel,
-    /// and buffer are dropped — the channel claim is released, the buffer is safe
-    /// because the engine was stopped). A wedged transfer is therefore *observable*,
-    /// not silently "done" — the UAF-on-timeout hole the mem-to-mem guard had.
+    /// and buffer are dropped — the channel claim is released). Bounded polling
+    /// does not establish that outstanding bus accesses have stopped.
     #[instability::unstable]
     pub fn wait(self) -> Result<(DmaDriver<'d, Dma0>, DmaChannel, BUF), DmaError> {
         // Skip the abort-on-drop: the transfer is completing normally.
@@ -1261,8 +1265,8 @@ impl<'d, BUF> PeripheralTransfer<'d, BUF> {
         }
 
         if this.driver.channel_enabled_raw(ch) {
-            // Timed out: cancel-then-quiesce so the engine is stopped before any
-            // buffer/cache teardown, then invalidate the RX destination (the DMA may
+            // Timed out: attempt cancellation before buffer/cache teardown. The
+            // bounded poll does not prove drain. Then invalidate the RX destination (the DMA may
             // have written partial data) before the buffer drops. The two `&mut`
             // field borrows are sequential (not simultaneous) so they reborrow
             // `&mut *this` one at a time.
@@ -1303,8 +1307,7 @@ impl<'d, BUF> PeripheralTransfer<'d, BUF> {
 #[cfg(feature = "chip-ws63")]
 impl<BUF> Drop for PeripheralTransfer<'_, BUF> {
     /// Cancel-then-quiesce: clear the peripheral DMA-enable, halt, drain `active`,
-    /// disable — so neither the channel nor the peripheral keeps asserting requests
-    /// against a buffer that's about to be freed.
+    /// disable. The bounded poll does not establish DMA bus drain.
     fn drop(&mut self) {
         cancel_then_quiesce(&mut self.peri_dis, &mut self.driver, self.channel.logical);
     }
