@@ -11,9 +11,9 @@
 //!   app routes the trap to [`on_alarm_interrupt`], which drains the expired
 //!   wakers and re-arms for the next deadline ([`embassy_time_queue_utils`]).
 //!
-//! The TCXO and TIMER register blocks are register-identical across the family
-//! (verified vs the fbb_ws63 / fbb_bs2x C SDKs); the only per-chip values — the
-//! crystal rate and the alarm IRQ — come from `soc::chip`.
+//! TIMER access is shared; TCXO counter layout is selected by chip. WS63 uses
+//! two 32-bit data registers and BS21 uses four 16-bit data registers. Crystal
+//! rate and alarm IRQ come from `soc::chip`.
 //!
 //! Requirements (see `examples/ws63/embassy_multitask`, `examples/bs21/embassy_multitask`):
 //! * The application enables `embassy-time/tick-hz-1_000_000` (matches `TICK_HZ`).
@@ -59,11 +59,7 @@ fn now_ticks() -> u64 {
             break; // count-valid
         }
     }
-    let c0 = r.tcxo_count0().read().bits() as u64;
-    let c1 = r.tcxo_count1().read().bits() as u64;
-    let c2 = r.tcxo_count2().read().bits() as u64;
-    let c3 = r.tcxo_count3().read().bits() as u64;
-    let count = (c3 << 48) | (c2 << 32) | (c1 << 16) | c0;
+    let count = crate::tcxo_words::read_counter(r);
     // TCXO crystal counter -> 1 MHz ticks (TCXO_HZ is per-chip from soc::chip).
     crate::embassy_time_math::counter_ticks(count, TCXO_COUNTS_PER_TICK)
 }

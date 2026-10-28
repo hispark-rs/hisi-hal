@@ -1,4 +1,4 @@
-//! TCXO 64-bit Free-Running Counter driver for WS63.
+//! TCXO 64-bit Free-Running Counter driver for WS63 and BS21.
 //!
 //! The WS63 TCXO provides a 64-bit free-running counter that can be used
 //! for precise timing measurements. The counter value must be latched
@@ -8,7 +8,7 @@
 //!
 //! 1. Write `refresh = 1` to latch the current count value
 //! 2. Wait for `valid` flag to be set
-//! 3. Read `count0..count3` to get the full 64-bit value
+//! 3. Read the chip's two 32-bit or four 16-bit count registers.
 
 use crate::peripherals::Tcxo;
 
@@ -90,15 +90,11 @@ impl<'d> TcxoDriver<'d> {
 
     /// Read the full 64-bit counter value.
     ///
-    /// Triggers a refresh to latch the current value, then reads all four
-    /// 16-bit count registers. Returns `None` if the refresh timed out.
+    /// Triggers a refresh and reads the chip-specific counter representation.
+    /// Returns `None` if the refresh timed out.
     pub fn read_counter(&self) -> Option<u64> {
         self.refresh().ok()?;
-        let c0 = self.regs().tcxo_count0().read().bits() as u64;
-        let c1 = self.regs().tcxo_count1().read().bits() as u64;
-        let c2 = self.regs().tcxo_count2().read().bits() as u64;
-        let c3 = self.regs().tcxo_count3().read().bits() as u64;
-        Some(crate::tcxo_words::join([c3, c2, c1, c0]))
+        Some(crate::tcxo_words::read_counter(self.regs()))
     }
 
     /// Read the lower 32 bits of the counter (faster, triggers refresh).
@@ -106,9 +102,7 @@ impl<'d> TcxoDriver<'d> {
     /// Returns `None` if the refresh timed out.
     pub fn read_counter32(&self) -> Option<u32> {
         self.refresh().ok()?;
-        let c0 = self.regs().tcxo_count0().read().bits();
-        let c1 = self.regs().tcxo_count1().read().bits();
-        Some((c1 << 16) | c0)
+        Some(crate::tcxo_words::read_counter32(self.regs()))
     }
 
     /// Check if the counter value is valid after a refresh.
@@ -152,6 +146,7 @@ mod tests {
     // catch a driver-bit change. The proptests below bind to the driver's own
     // `TCXO_*_BIT` consts and verify the real read-modify-write properties.)
 
+    #[cfg(feature = "chip-bs21")]
     #[test]
     fn test_tcxo_counter_64bit_assembly() {
         // read_counter assembles c3:c2:c1:c0 as a 64-bit value
@@ -163,6 +158,7 @@ mod tests {
         assert_eq!(counter, 0xDEF0_9ABC_5678_1234);
     }
 
+    #[cfg(feature = "chip-bs21")]
     #[test]
     fn test_tcxo_counter_32bit_assembly() {
         // read_counter32 assembles c1:c0 as a 32-bit value
@@ -191,6 +187,7 @@ mod proptests {
         /// four 16-bit count registers. Each lane occupies its own 16-bit slot
         /// with no overlap, regardless of input. Mirrors:
         ///   (c3 << 48) | (c2 << 32) | (c1 << 16) | c0
+        #[cfg(feature = "chip-bs21")]
         #[test]
         fn read_counter64_roundtrip(
             c0 in any::<u16>(),
@@ -210,6 +207,7 @@ mod proptests {
         /// Fuzz: the 64-bit assembly never sets a stray bit beyond the four
         /// documented 16-bit lanes (it occupies the full 64-bit width with no
         /// gaps and no overflow). Equivalent to a byte/word LE pack.
+        #[cfg(feature = "chip-bs21")]
         #[test]
         fn read_counter64_no_stray_bits(
             c0 in any::<u16>(),
@@ -239,6 +237,7 @@ mod proptests {
         /// Fuzz: read_counter32() low-half assembly round-trips the two low
         /// 16-bit registers. Mirrors the driver, which keeps the regs as u32:
         ///   (c1 << 16) | c0
+        #[cfg(feature = "chip-bs21")]
         #[test]
         fn read_counter32_roundtrip(c0 in any::<u16>(), c1 in any::<u16>()) {
             // Driver reads these as u32; widen exactly the same way.
@@ -259,6 +258,7 @@ mod proptests {
 
         /// Fuzz: the low 32 bits of the full 64-bit read agree with the fast
         /// 32-bit read for the same two low registers.
+        #[cfg(feature = "chip-bs21")]
         #[test]
         fn read_counter32_matches_low_of_64(
             c0 in any::<u16>(),

@@ -212,9 +212,8 @@ pub mod sdio;
 #[cfg(feature = "chip-ws53")]
 #[path = "symc_ws53.rs"]
 pub mod symc;
-// Chip-neutral: the embassy-time driver reads TCXO_HZ/TIMER_CLOCK_HZ and the
-// alarm interrupt from `soc::chip`, and the TCXO/TIMER register blocks are
-// register-identical across WS63 and BS2X (verified vs fbb_ws63 / fbb_bs2x).
+// The embassy driver obtains clocks/IRQ from `soc::chip`; TCXO counter layout
+// is selected separately for WS63 (two words) and BS21 (four halfword fields).
 unstable_driver! {
     /// embassy-time `Driver` implementation backed by TCXO/TIMER for `embassy-executor`.
     #[cfg(feature = "embassy")]
