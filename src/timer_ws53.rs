@@ -57,8 +57,10 @@ impl TimerTicks {
     }
     /// Convert microseconds using the established 32 MHz SDK clock profile.
     pub const fn from_micros(us: u32) -> Option<Self> {
-        let ticks = TIMER_CLOCK_HZ as u64 * us as u64 / 1_000_000;
-        if ticks > u32::MAX as u64 { None } else { Self::from_count(ticks as u32) }
+        match crate::timer_math::checked_ticks(us, TIMER_CLOCK_HZ, core::num::NonZeroU32::new(1_000_000).unwrap()) {
+            Some(ticks) => Self::from_count(ticks),
+            None => None,
+        }
     }
     /// Period in hardware counter ticks.
     pub const fn count(self) -> u32 {

@@ -141,6 +141,7 @@ pub mod timer;
 #[cfg(feature = "chip-ws53")]
 #[path = "timer_ws53.rs"]
 pub mod timer;
+mod timer_math;
 /// UART serial driver (blocking and `embedded-io`).
 pub mod uart;
 unstable_module! {

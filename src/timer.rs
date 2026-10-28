@@ -76,15 +76,19 @@ pub enum TimerError {
 /// 32-bit load/period register would overflow (the old silent `u32::MAX` clamp).
 #[allow(dead_code)]
 const fn try_ticks_for_us(us: u32) -> Result<u32, TimerError> {
-    let ticks = TIMER_CLOCK_HZ as u64 * us as u64 / 1_000_000;
-    if ticks > u32::MAX as u64 { Err(TimerError::TicksOverflow) } else { Ok(ticks as u32) }
+    match crate::timer_math::checked_ticks(us, TIMER_CLOCK_HZ, core::num::NonZeroU32::new(1_000_000).unwrap()) {
+        Some(ticks) => Ok(ticks),
+        None => Err(TimerError::TicksOverflow),
+    }
 }
 
 /// Convert milliseconds to timer ticks, or [`TimerError::TicksOverflow`] on overflow.
 #[allow(dead_code)]
 const fn try_ticks_for_ms(ms: u32) -> Result<u32, TimerError> {
-    let ticks = TIMER_CLOCK_HZ as u64 * ms as u64 / 1_000;
-    if ticks > u32::MAX as u64 { Err(TimerError::TicksOverflow) } else { Ok(ticks as u32) }
+    match crate::timer_math::checked_ticks(ms, TIMER_CLOCK_HZ, core::num::NonZeroU32::new(1_000).unwrap()) {
+        Some(ticks) => Ok(ticks),
+        None => Err(TimerError::TicksOverflow),
+    }
 }
 
 /// Saturating µs→ticks for the blocking `embedded_hal::delay::DelayNs` impl, whose
@@ -92,15 +96,19 @@ const fn try_ticks_for_ms(ms: u32) -> Result<u32, TimerError> {
 /// the accepted embedded-hal semantics for an out-of-range request.
 #[allow(dead_code)]
 const fn ticks_for_us_saturating(us: u32) -> u32 {
-    let ticks = TIMER_CLOCK_HZ as u64 * us as u64 / 1_000_000;
-    if ticks > u32::MAX as u64 { u32::MAX } else { ticks as u32 }
+    match crate::timer_math::checked_ticks(us, TIMER_CLOCK_HZ, core::num::NonZeroU32::new(1_000_000).unwrap()) {
+        Some(ticks) => ticks,
+        None => u32::MAX,
+    }
 }
 
 /// Saturating ms→ticks for the blocking `DelayNs` impl (see [`ticks_for_us_saturating`]).
 #[allow(dead_code)]
 const fn ticks_for_ms_saturating(ms: u32) -> u32 {
-    let ticks = TIMER_CLOCK_HZ as u64 * ms as u64 / 1_000;
-    if ticks > u32::MAX as u64 { u32::MAX } else { ticks as u32 }
+    match crate::timer_math::checked_ticks(ms, TIMER_CLOCK_HZ, core::num::NonZeroU32::new(1_000).unwrap()) {
+        Some(ticks) => ticks,
+        None => u32::MAX,
+    }
 }
 
 /// Timer driver managing 3 independent timer channels.
