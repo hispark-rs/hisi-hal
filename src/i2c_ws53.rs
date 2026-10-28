@@ -161,15 +161,12 @@ fn abort_kind(source: u32, detail: u32) -> ErrorKind {
     if source != 0 {
         return ErrorKind::Other;
     }
-    match detail {
-        0x1000 | 0x5000 => ErrorKind::ArbitrationLoss,
-        bits if bits != 0 && bits & !0x0f == 0 => match (bits & 0x07 != 0, bits & 0x08 != 0) {
-            (true, false) => ErrorKind::NoAcknowledge(NoAcknowledgeSource::Address),
-            (false, true) => ErrorKind::NoAcknowledge(NoAcknowledgeSource::Data),
-            (true, true) => ErrorKind::NoAcknowledge(NoAcknowledgeSource::Unknown),
-            _ => ErrorKind::Other,
-        },
-        _ => ErrorKind::Other,
+    match crate::i2c_v151_abort::classify(detail) {
+        crate::i2c_v151_abort::Cause::ArbitrationLost => ErrorKind::ArbitrationLoss,
+        crate::i2c_v151_abort::Cause::AddressNack => ErrorKind::NoAcknowledge(NoAcknowledgeSource::Address),
+        crate::i2c_v151_abort::Cause::DataNack => ErrorKind::NoAcknowledge(NoAcknowledgeSource::Data),
+        crate::i2c_v151_abort::Cause::MixedNack => ErrorKind::NoAcknowledge(NoAcknowledgeSource::Unknown),
+        crate::i2c_v151_abort::Cause::Other => ErrorKind::Other,
     }
 }
 /// Exclusive SCL/SDA pad permissions for one typed controller instance.

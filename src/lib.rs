@@ -235,6 +235,8 @@ mod embassy_time_math;
 pub mod i2c;
 #[cfg(any(feature = "chip-ws53", feature = "chip-bs21"))]
 mod i2c_plan;
+#[cfg(any(feature = "chip-ws53", feature = "chip-bs21"))]
+mod i2c_v151_abort;
 unstable_module! {
     /// I2C driver (BS2X Synopsys DesignWare v151 core).
     #[cfg(feature = "chip-bs21")]

@@ -222,15 +222,12 @@ fn wait_transaction<I: TransactionIo>(io: &mut I, limit: u32, ready: impl Fn(&mu
 // fbb_bs2x SDK 80d4672b, hal_i2c_v151_regs_def.h: TX_ABRT_SLV_INTX
 // bits 0..4 describe NACK, bit 12 arbitration loss; other causes remain raw.
 fn classify_abort(source: u32) -> I2cError {
-    const NACK: u32 = 0x1f;
-    // The SDK says slave arbitration loss (bit14) also asserts bit12.
-    // Any other simultaneous or unknown cause must retain the raw word.
-    if source == 0x1000 || source == 0x5000 {
-        I2cError::ArbitrationLost
-    } else if source & NACK != 0 && source & !NACK == 0 {
-        I2cError::Nack
-    } else {
-        I2cError::Abort { source }
+    match crate::i2c_v151_abort::classify(source) {
+        crate::i2c_v151_abort::Cause::ArbitrationLost => I2cError::ArbitrationLost,
+        crate::i2c_v151_abort::Cause::AddressNack
+        | crate::i2c_v151_abort::Cause::DataNack
+        | crate::i2c_v151_abort::Cause::MixedNack => I2cError::Nack,
+        crate::i2c_v151_abort::Cause::Other => I2cError::Abort { source },
     }
 }
 
