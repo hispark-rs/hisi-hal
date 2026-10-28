@@ -374,19 +374,16 @@ impl<R: Registers, D: DelayNs> Engine<R, D> {
         if self.state != State::Ready {
             return Err(Error::Poisoned);
         }
-        let last = ops.iter().rposition(|op| match op {
-            Operation::Read(b) => !b.is_empty(),
-            Operation::Write(b) => !b.is_empty(),
-        });
-        let Some(last) = last else {
+        let planner = crate::i2c_plan::Planner::new(ops);
+        if planner.is_empty() {
             return Ok(());
-        };
+        }
         // Ready always means disabled and quiesced, including after success/error.
         self.state = State::Poisoned;
         self.io.target(address);
         self.io.clear();
         self.io.enable(true);
-        let mut result = self.transfer(ops, last);
+        let mut result = self.transfer(ops, planner);
         // Sample again after the final status read, before disable can change
         // error visibility. The first poll may precede the final bus event.
         if result.is_ok()
@@ -418,34 +415,20 @@ impl<R: Registers, D: DelayNs> Engine<R, D> {
             (Ok(()), Err(f)) => Err(Error::RecoveryFailed(f)),
         }
     }
-    fn transfer(&mut self, ops: &mut [Operation<'_>], last: usize) -> Result<(), Failure> {
+    fn transfer(&mut self, ops: &mut [Operation<'_>], mut planner: crate::i2c_plan::Planner) -> Result<(), Failure> {
         self.poll(Wait::Enable, true, |s| s.enabled)?;
-        let mut previous = None;
-        for (index, op) in ops.iter_mut().enumerate().take(last + 1) {
-            let read = matches!(op, Operation::Read(_));
-            let len = match op {
-                Operation::Read(b) => b.len(),
-                Operation::Write(b) => b.len(),
+        while let Some(step) = planner.next(ops) {
+            self.poll(Wait::Transmit, true, |s| s.tx_ready)?;
+            let data = match &ops[step.op] {
+                Operation::Write(b) => b[step.byte],
+                Operation::Read(_) => 0,
             };
-            for byte in 0..len {
-                self.poll(Wait::Transmit, true, |s| s.tx_ready)?;
-                let data = match op {
-                    Operation::Write(b) => b[byte],
-                    Operation::Read(_) => 0,
-                };
-                self.io.send(Command {
-                    data,
-                    read,
-                    restart: byte == 0 && previous.is_some_and(|p| p != read),
-                    stop: index == last && byte + 1 == len,
-                });
-                if let Operation::Read(buffer) = op {
-                    // At most one outstanding read: never enqueue more than the
-                    // receive FIFO can hold, including across adjacent read ops.
-                    self.poll(Wait::Receive, true, |s| s.rx_ready)?;
-                    buffer[byte] = self.io.receive();
-                }
-                previous = Some(read);
+            self.io.send(Command { data, read: step.read, restart: step.restart, stop: step.stop });
+            if let Operation::Read(buffer) = &mut ops[step.op] {
+                // At most one outstanding read: never enqueue more than the
+                // receive FIFO can hold, including across adjacent read ops.
+                self.poll(Wait::Receive, true, |s| s.rx_ready)?;
+                buffer[step.byte] = self.io.receive();
             }
         }
         self.poll(Wait::Stop, true, |s| s.stop && s.tx_empty && !s.active)
