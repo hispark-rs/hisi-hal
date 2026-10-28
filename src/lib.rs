@@ -232,7 +232,7 @@ mod embassy_time_math;
 /// I2C driver (WS63 custom v150 core).
 #[cfg(feature = "chip-ws63")]
 pub mod i2c;
-#[cfg(feature = "chip-ws53")]
+#[cfg(any(feature = "chip-ws53", feature = "chip-bs21"))]
 mod i2c_plan;
 unstable_module! {
     /// I2C driver (BS2X Synopsys DesignWare v151 core).
