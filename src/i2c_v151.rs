@@ -11,10 +11,9 @@
 //! `probe` (ACK detection) for bus scans.
 //!
 //! This experimental backend does not yet establish that a timed-out or aborted
-//! transaction has left the physical bus idle. Its existing error API reports
-//! any TX abort as `Nack` and cannot distinguish arbitration loss or other abort
-//! causes. Do not infer successful bus recovery or peer state from that error;
-//! platform recovery and real bus behavior still require validation.
+//! transaction has left the physical bus idle. Do not infer successful bus
+//! recovery or peer state from an error; platform recovery and real bus behavior
+//! still require validation.
 
 use crate::peripherals::{I2c0, I2c1};
 use core::marker::PhantomData;
@@ -35,8 +34,15 @@ pub enum Speed {
 pub enum I2cError {
     /// A status bit never asserted within the bounded wait.
     Timeout,
-    /// The addressed device did not ACK (DesignWare TX_ABRT / addr_7b_noack).
+    /// Address, data or general call was not acknowledged.
     Nack,
+    /// The controller reported lost bus arbitration.
+    ArbitrationLost,
+    /// Another or ambiguous abort; `source` preserves the raw source bits.
+    Abort {
+        /// Raw `IC_TX_ABRT_SLV_INTX` bits captured before clearing the abort.
+        source: u32,
+    },
 }
 
 // embedded-hal 1.0 portability: wire the BS2X I2C error + driver into the standard
@@ -47,7 +53,8 @@ impl embedded_hal::i2c::Error for I2cError {
             I2cError::Nack => {
                 embedded_hal::i2c::ErrorKind::NoAcknowledge(embedded_hal::i2c::NoAcknowledgeSource::Unknown)
             }
-            I2cError::Timeout => embedded_hal::i2c::ErrorKind::Other,
+            I2cError::ArbitrationLost => embedded_hal::i2c::ErrorKind::ArbitrationLoss,
+            I2cError::Timeout | I2cError::Abort { .. } => embedded_hal::i2c::ErrorKind::Other,
         }
     }
 }
@@ -175,6 +182,7 @@ trait TransactionIo {
     fn rx_ready(&mut self) -> bool;
     fn stopped(&mut self) -> bool;
     fn aborted(&mut self) -> bool;
+    fn abort_source(&mut self) -> u32;
     fn clear_abort(&mut self);
     fn send(&mut self, data: u8, read: bool, restart: bool, stop: bool);
     fn receive(&mut self) -> u8;
@@ -193,17 +201,36 @@ fn run_probe(io: &mut impl TransactionIo, address: u8) -> bool {
 fn wait_transaction<I: TransactionIo>(io: &mut I, limit: u32, ready: impl Fn(&mut I) -> bool) -> Result<(), I2cError> {
     for _ in 0..limit {
         if io.aborted() {
+            let error = classify_abort(io.abort_source());
             io.clear_abort();
-            return Err(I2cError::Nack);
+            return Err(error);
         }
         if ready(io) {
             // An abort may arrive with the ready condition; never report it as success.
-            if io.aborted() { io.clear_abort(); return Err(I2cError::Nack); }
+            if io.aborted() {
+                let error = classify_abort(io.abort_source());
+                io.clear_abort();
+                return Err(error);
+            }
             return Ok(());
         }
         core::hint::spin_loop();
     }
     Err(I2cError::Timeout)
+}
+
+// fbb_bs2x SDK 80d4672b, hal_i2c_v151_regs_def.h: TX_ABRT_SLV_INTX
+// bits 0..4 describe NACK, bit 12 arbitration loss; other causes remain raw.
+fn classify_abort(source: u32) -> I2cError {
+    const NACK: u32 = 0x1f;
+    const ARBITRATION_LOST: u32 = 1 << 12;
+    if source & ARBITRATION_LOST != 0 {
+        I2cError::ArbitrationLost
+    } else if source & NACK != 0 && source & !NACK == 0 {
+        I2cError::Nack
+    } else {
+        I2cError::Abort { source }
+    }
 }
 
 fn run_transaction(io: &mut impl TransactionIo, address: u8, operations: &mut [embedded_hal::i2c::Operation<'_>], limit: u32) -> Result<(), I2cError> {
@@ -237,6 +264,7 @@ impl TransactionIo for PacTransaction {
     fn rx_ready(&mut self) -> bool { i2c_regs(self.0).ic_status().read().rfne().bit_is_set() }
     fn stopped(&mut self) -> bool { i2c_regs(self.0).ic_raw_intr_stat().read().stop_det().bit_is_set() }
     fn aborted(&mut self) -> bool { i2c_regs(self.0).ic_raw_intr_stat().read().tx_abrt().bit_is_set() }
+    fn abort_source(&mut self) -> u32 { i2c_regs(self.0).ic_tx_abrt_slv_intx().read().bits() }
     fn clear_abort(&mut self) { let _ = i2c_regs(self.0).ic_clr_intr().read().bits(); }
     fn send(&mut self, data: u8, read: bool, restart: bool, stop: bool) {
         i2c_regs(self.0).ic_data_cmd().write(|w| unsafe { w.dat().bits(data).cmd().bit(read).restart().bit(restart).stop().bit(stop) });
@@ -256,6 +284,7 @@ mod tests {
         commands: std::vec::Vec<(u8, bool, bool, bool)>,
         rx: std::collections::VecDeque<u8>,
         abort_after: Option<usize>,
+        source: u32,
         stalled: bool,
         no_stop: bool,
         abort_on_stop: bool,
@@ -271,7 +300,8 @@ mod tests {
             stopped
         }
         fn aborted(&mut self) -> bool { self.abort_after == Some(self.commands.len()) }
-        fn clear_abort(&mut self) { self.cleared += 1; self.abort_after = None; }
+        fn abort_source(&mut self) -> u32 { self.source }
+        fn clear_abort(&mut self) { self.cleared += 1; self.abort_after = None; self.source = 0; }
         fn send(&mut self, data: u8, read: bool, restart: bool, stop: bool) { self.commands.push((data, read, restart, stop)); }
         fn receive(&mut self) -> u8 { self.rx.pop_front().unwrap() }
     }
@@ -300,6 +330,7 @@ mod tests {
         assert!(mock.commands.is_empty());
         mock.stalled = false;
         mock.abort_after = Some(1);
+        mock.source = 1;
         let mut output = [0x55];
         assert_eq!(run_transaction(&mut mock, 0x52, &mut [Operation::Read(&mut output)], 3), Err(I2cError::Nack));
         assert_eq!(output, [0x55]);
@@ -321,10 +352,29 @@ mod tests {
     #[test]
     fn abort_arriving_with_stop_is_not_reported_as_success() {
         use embedded_hal::i2c::Operation;
-        let mut mock = TransactionMock { abort_on_stop: true, ..Default::default() };
+        let mut mock = TransactionMock { abort_on_stop: true, source: 1, ..Default::default() };
         assert_eq!(run_transaction(&mut mock, 0x52, &mut [Operation::Write(&[9])], 3), Err(I2cError::Nack));
         assert_eq!(mock.commands, [(9, false, false, true)]);
         assert_eq!(mock.cleared, 1);
+    }
+
+    #[test]
+    fn abort_source_is_sampled_before_clear_and_classified_conservatively() {
+        use embedded_hal::i2c::{Error as _, ErrorKind, NoAcknowledgeSource, Operation};
+        for (source, expected, kind) in [
+            (1, I2cError::Nack, ErrorKind::NoAcknowledge(NoAcknowledgeSource::Unknown)),
+            (8, I2cError::Nack, ErrorKind::NoAcknowledge(NoAcknowledgeSource::Unknown)),
+            (1 << 12, I2cError::ArbitrationLost, ErrorKind::ArbitrationLoss),
+            (1 << 9, I2cError::Abort { source: 1 << 9 }, ErrorKind::Other),
+            (0, I2cError::Abort { source: 0 }, ErrorKind::Other),
+            (1 | (1 << 9), I2cError::Abort { source: 1 | (1 << 9) }, ErrorKind::Other),
+        ] {
+            let mut mock = TransactionMock { abort_after: Some(1), source, ..Default::default() };
+            let actual = run_transaction(&mut mock, 0x52, &mut [Operation::Write(&[9])], 3).unwrap_err();
+            assert_eq!(actual.kind(), kind);
+            assert_eq!(actual, expected);
+            assert_eq!(mock.cleared, 1);
+        }
     }
 
     #[test]
