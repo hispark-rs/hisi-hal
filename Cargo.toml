@@ -30,6 +30,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 # inactive one is never compiled.
 ws63-pac = { version = "0.4.4", default-features = false, features = ["critical-section"], optional = true }
 bs2x-pac = { version = "0.1.2", default-features = false, features = ["critical-section"], optional = true }
+ws53-pac = { version = "0.1.0-alpha.1", default-features = false, features = ["critical-section"], optional = true }
+# Volatile cells for ordinary, externally shared uncached RAM (not MMIO).
+vcell = { version = "0.1.3", optional = true }
 embedded-hal = "1.0.0"
 embedded-hal-nb = "1.0"
 # Owned-buffer DMA traits (`ReadBuffer`/`WriteBuffer`) for the `dma::Transfer` guard.
@@ -130,7 +133,8 @@ chip-bs21 = [
 ]
 # `rt`: riscv-rt integration. The weak `pac?/rt` enables the rt feature of whichever
 # PAC is active (its device.x interrupt vectors), without forcing the inactive one.
-rt = ["dep:critical-section", "ws63-pac?/rt", "bs2x-pac?/rt"]
+chip-ws53 = ["dep:ws53-pac", "dep:vcell", "dep:critical-section", "hisi-riscv-rt/chip-ws53"]
+rt = ["dep:critical-section", "ws63-pac?/rt", "bs2x-pac?/rt", "ws53-pac?/rt"]
 # `async`: stable blocking-backed embedded-hal-async impls for SPI/I2C plus the
 # optional async dependencies. Interrupt+waker helpers (`asynch::block_on`,
 # GPIO Wait, TIMER DelayNs, UART async I/O, DMA/LSADC async hooks) additionally

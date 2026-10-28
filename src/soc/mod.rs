@@ -26,3 +26,11 @@ pub(crate) use bs2x_pac as pac;
 /// The active chip's Peripheral Access Crate (`ws63_pac` or `bs2x_pac`).
 #[cfg(feature = "chip-ws63")]
 pub(crate) use ws63_pac as pac;
+
+/// WS53 application-core integration facts.
+#[cfg(feature = "chip-ws53")]
+pub mod ws53;
+#[cfg(feature = "chip-ws53")]
+pub use ws53 as chip;
+#[cfg(feature = "chip-ws53")]
+pub(crate) use ws53_pac as pac;

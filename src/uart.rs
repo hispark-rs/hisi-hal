@@ -9,7 +9,38 @@
 //! (issue #15/#10).
 
 use crate::peripherals::{Uart0, Uart1, Uart2};
+
+#[cfg(feature = "chip-ws53")]
+#[path = "uart_ws53.rs"]
+mod ws53;
 use core::marker::PhantomData;
+#[cfg(feature = "chip-ws53")]
+pub use ws53::{ReceiveError, ReceiveInterrupt};
+#[cfg(feature = "chip-ws53")]
+#[path = "uart_ws53/line.rs"]
+mod ws53_line;
+#[cfg(feature = "chip-ws53")]
+pub use ws53_line::{LineConfig, StopDuration};
+#[cfg(feature = "chip-ws53")]
+#[path = "uart_ws53/reset.rs"]
+mod ws53_reset;
+#[cfg(feature = "chip-ws53")]
+pub use ws53_reset::{ResetError, ResettableUart, SignalPath};
+#[cfg(feature = "chip-ws53")]
+#[path = "uart_ws53/h0.rs"]
+mod ws53_h0;
+#[cfg(feature = "chip-ws53")]
+pub use ws53_h0::{H0InitError, H0InitFailure};
+#[cfg(feature = "chip-ws53")]
+#[path = "uart_ws53/route.rs"]
+mod ws53_route;
+#[cfg(feature = "chip-ws53")]
+pub use ws53_route::InterruptRouteError;
+#[cfg(all(feature = "chip-ws53", feature = "async"))]
+#[path = "uart_ws53/asynch.rs"]
+mod ws53_async;
+#[cfg(all(feature = "chip-ws53", feature = "async"))]
+pub use ws53_async::{AsyncBindError, AsyncReceiver, AsyncTransmitter, TransmitInterrupt};
 
 mod sealed {
     pub trait UartInstanceSealed {}
@@ -146,6 +177,7 @@ pub enum UartClock {
     Boot,
 }
 
+#[cfg(not(feature = "chip-ws53"))]
 impl UartClock {
     fn hz(self) -> u32 {
         match self {
@@ -160,7 +192,7 @@ fn boot_uart_clock_hz() -> u32 {
     crate::soc::chip::uart_boot_clock_hz()
 }
 
-#[cfg(not(feature = "chip-ws63"))]
+#[cfg(feature = "chip-bs21")]
 fn boot_uart_clock_hz() -> u32 {
     crate::soc::chip::UART_CLOCK_HZ
 }
@@ -195,6 +227,8 @@ impl Default for Config {
 /// UART driver instance, generic over the UART peripheral type `T` (Uart0/1/2).
 pub struct Uart<'d, T> {
     _peripheral: PhantomData<&'d T>,
+    #[cfg(feature = "chip-ws53")]
+    pending_receive_error: core::cell::Cell<Option<ReceiveError>>,
 }
 
 #[allow(dead_code)]
@@ -217,14 +251,17 @@ fn uart_regs(port: UartPort) -> &'static crate::soc::pac::uart0::RegisterBlock {
 }
 
 #[allow(dead_code)]
+#[cfg(not(feature = "chip-ws53"))]
 fn write_fifo_blocking_levels(r: &crate::soc::pac::uart0::RegisterBlock) {
     r.fifo_ctl().write(|w| w.fifo_en().set_bit().tx_empty_trig().empty().rx_empty_trig().char1());
 }
 
+#[cfg(not(feature = "chip-ws53"))]
 fn write_fifo_dma_levels(r: &crate::soc::pac::uart0::RegisterBlock) {
     r.fifo_ctl().write(|w| w.fifo_en().set_bit().tx_empty_trig().chars2().rx_empty_trig().quarter());
 }
 
+#[cfg(not(feature = "chip-ws53"))]
 impl<'d> Uart<'d, Uart0<'d>> {
     /// Create and configure a UART0 driver from the peripheral token and config.
     pub fn new_uart0(_uart: Uart0<'d>, config: Config) -> Self {
@@ -233,6 +270,7 @@ impl<'d> Uart<'d, Uart0<'d>> {
     }
 }
 
+#[cfg(not(feature = "chip-ws53"))]
 impl<'d> Uart<'d, Uart1<'d>> {
     /// Create and configure a UART1 driver from the peripheral token and config.
     pub fn new_uart1(_uart: Uart1<'d>, config: Config) -> Self {
@@ -241,6 +279,7 @@ impl<'d> Uart<'d, Uart1<'d>> {
     }
 }
 
+#[cfg(not(feature = "chip-ws53"))]
 impl<'d> Uart<'d, Uart2<'d>> {
     /// Create and configure a UART2 driver from the peripheral token and config.
     #[instability::unstable]
@@ -250,6 +289,7 @@ impl<'d> Uart<'d, Uart2<'d>> {
     }
 }
 
+#[cfg(not(feature = "chip-ws53"))]
 fn configure_uart(port: UartPort, config: &Config) {
     let r = uart_regs(port);
 
@@ -307,31 +347,41 @@ fn configure_uart(port: UartPort, config: &Config) {
 }
 
 impl<T: UartInstance> Uart<'_, T> {
+    /// Try to write one byte without waiting for external progress.
+    pub fn try_write_byte(&self, byte: u8) -> nb::Result<(), core::convert::Infallible> {
+        let r = uart_regs(T::PORT);
+        if r.fifo_status().read().tx_fifo_full().bit_is_set() {
+            return Err(nb::Error::WouldBlock);
+        }
+        write_data(r, byte);
+        Ok(())
+    }
+
     /// Write one byte, blocking while this UART's TX FIFO is full.
     pub fn write_byte(&self, byte: u8) {
         let r = uart_regs(T::PORT);
         while r.fifo_status().read().tx_fifo_full().bit_is_set() {}
-        r.data().write(|w| unsafe { w.data().bits(byte) });
+        write_data(r, byte);
     }
 
     /// Read one byte, or `None` if this UART's RX FIFO is empty.
+    #[cfg(not(feature = "chip-ws53"))]
     pub fn read_byte(&self) -> Option<u8> {
         let r = uart_regs(T::PORT);
-        // `LINE_STATUS.data_available` is the UART's authoritative receive-data
-        // indication. On WS63 UART0, `RX_FIFO_CNT` can remain zero while the FIFO
-        // is full (`RX_FIFO_WRITE` reports level 64), so gating on the count loses
-        // every host-to-target byte. The FIFO-empty bit is also unsuitable for a
-        // single-byte pop on this IP revision.
+        // WS63's receive-count alias differs from the WS53 SDK layout.
+        // Preserve the existing silicon-qualified path for older chips.
         if r.line_status().read().data_available().bit_is_clear() { None } else { Some(r.data().read().bits() as u8) }
     }
 
     /// Block until this UART's TX FIFO is fully drained.
+    #[cfg(not(feature = "chip-ws53"))]
     pub fn flush_tx(&self) {
         let r = uart_regs(T::PORT);
         while !r.fifo_status().read().tx_fifo_empty().bit_is_set() {}
     }
 
     /// Non-blocking check: returns true if TX FIFO is fully drained.
+    #[cfg(not(feature = "chip-ws53"))]
     pub fn tx_flushed(&self) -> bool {
         uart_regs(T::PORT).fifo_status().read().tx_fifo_empty().bit_is_set()
     }
@@ -351,6 +401,32 @@ impl<T: UartInstance> Uart<'_, T> {
     #[instability::unstable]
     pub unsafe fn register_block(&self) -> &'static crate::soc::pac::uart0::RegisterBlock {
         uart_regs(T::PORT)
+    }
+}
+
+fn write_data(r: &crate::soc::pac::uart0::RegisterBlock, byte: u8) {
+    #[cfg(not(feature = "chip-ws53"))]
+    r.data().write(|w| unsafe { w.data().bits(byte) });
+    #[cfg(feature = "chip-ws53")]
+    // The SDK uses a complete word write; no read or assumed reset is needed.
+    unsafe {
+        r.tx().write_with_zero(|w| w.data().bits(byte))
+    };
+}
+
+#[cfg(feature = "chip-ws53")]
+impl<'d, T: UartInstance> Uart<'d, T> {
+    /// Attach to a UART configured by the boot environment without changing
+    /// its divider, FIFO, pad mux or clock selection.
+    ///
+    /// # Safety
+    /// The UART must be running in ordinary data mode (divisor latch disabled)
+    /// with its clock and signal path (pads or internal loopback) configured,
+    /// and have no other CPU/DMA/IRQ user. Internal loopback does not establish
+    /// a physical pad route or qualify external pin operation.
+    /// This bootstrap constructor is not a full WS53 clock/pin configuration API.
+    pub unsafe fn from_configured(_uart: T) -> Self {
+        Self { _peripheral: PhantomData, pending_receive_error: core::cell::Cell::new(None) }
     }
 }
 
@@ -542,6 +618,7 @@ pub enum UartDmaError {
     Timeout,
 }
 
+#[cfg(not(feature = "chip-ws53"))]
 impl embedded_io::ErrorType for Uart<'_, Uart0<'_>> {
     type Error = core::convert::Infallible;
 }
@@ -557,6 +634,7 @@ impl embedded_io::Write for Uart<'_, Uart0<'_>> {
         Ok(())
     }
 }
+#[cfg(not(feature = "chip-ws53"))]
 impl embedded_io::Read for Uart<'_, Uart0<'_>> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         let mut n = 0;
@@ -573,6 +651,7 @@ impl embedded_io::Read for Uart<'_, Uart0<'_>> {
 }
 
 // UART1 embedded-io traits
+#[cfg(not(feature = "chip-ws53"))]
 impl embedded_io::ErrorType for Uart<'_, Uart1<'_>> {
     type Error = core::convert::Infallible;
 }
@@ -588,6 +667,7 @@ impl embedded_io::Write for Uart<'_, Uart1<'_>> {
         Ok(())
     }
 }
+#[cfg(not(feature = "chip-ws53"))]
 impl embedded_io::Read for Uart<'_, Uart1<'_>> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         let mut n = 0;
@@ -604,6 +684,7 @@ impl embedded_io::Read for Uart<'_, Uart1<'_>> {
 }
 
 // UART2 embedded-io traits
+#[cfg(not(feature = "chip-ws53"))]
 impl embedded_io::ErrorType for Uart<'_, Uart2<'_>> {
     type Error = core::convert::Infallible;
 }
@@ -619,6 +700,7 @@ impl embedded_io::Write for Uart<'_, Uart2<'_>> {
         Ok(())
     }
 }
+#[cfg(not(feature = "chip-ws53"))]
 impl embedded_io::Read for Uart<'_, Uart2<'_>> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         let mut n = 0;
@@ -636,6 +718,7 @@ impl embedded_io::Read for Uart<'_, Uart2<'_>> {
 
 // ── embedded-hal-nb serial traits ──────────────────────────────
 
+#[cfg(not(feature = "chip-ws53"))]
 macro_rules! impl_nb_serial {
     ($uart:ty) => {
         impl embedded_hal_nb::serial::ErrorType for Uart<'_, $uart> {
@@ -661,8 +744,11 @@ macro_rules! impl_nb_serial {
     };
 }
 
+#[cfg(not(feature = "chip-ws53"))]
 impl_nb_serial!(Uart0<'_>);
+#[cfg(not(feature = "chip-ws53"))]
 impl_nb_serial!(Uart1<'_>);
+#[cfg(not(feature = "chip-ws53"))]
 impl_nb_serial!(Uart2<'_>);
 
 // ── Async UART (embedded-io-async) ──────────────────────────────────────────
@@ -671,6 +757,7 @@ mod asynch_impl {
     use super::{Uart, UartPort, uart_regs};
     use crate::asynch::IrqSignal;
     use crate::peripherals::{Uart0, Uart1, Uart2};
+
     use core::cell::Cell;
     use core::future::Future;
     use core::pin::Pin;
@@ -822,6 +909,7 @@ mod tests {
     /// 115200 baud at 160 MHz: div = 160e6/(16*115200) ≈ 86.8 → div=86, frac≈51.
     /// div * 64 = 5546 → div=86 (0x56), frac=42 (5546 & 0x3F). Verify exact bytes.
     #[test]
+    #[cfg(feature = "chip-ws63")]
     fn baud_115200_known_divisor() {
         // div64 = 160_000_000 * 4 / 115200 = 5555 (integer truncation).
         let div64 = (UART_CLOCK_HZ as u64) * 4 / 115200;
@@ -930,8 +1018,7 @@ mod tests {
     /// Two stop bits sets bit 7; one stop bit leaves it clear.
     #[test]
     fn stop_bits_encoding() {
-        let mut c = Config::default();
-        c.stop_bits = StopBits::One;
+        let mut c = Config { stop_bits: StopBits::One, ..Config::default() };
         assert_eq!(build_ctl(&c) & (1 << 7), 0);
         c.stop_bits = StopBits::Two;
         assert_eq!(build_ctl(&c) & (1 << 7), 1 << 7);
