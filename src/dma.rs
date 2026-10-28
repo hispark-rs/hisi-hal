@@ -1142,8 +1142,27 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// Returns [`DmaError::TransferTooLarge`] if `src` exceeds 4095 beats (a
     /// single-block DMA `trans_size` cap — chunk the buffer). On `Err` the driver,
     /// channel, and buffer are dropped (the channel claim is released).
+    ///
+    /// # Safety
+    /// The caller must exclusively own the actual peripheral and establish that
+    /// its data-register address, request ID, direction and teardown handle
+    /// refer to the same device. The selected register must permit this access.
+    /// Keep the buffer, peripheral and complete affected cache lines valid and
+    /// inaccessible to other actors until independent evidence proves all DMA
+    /// activity and bus writes stopped, including after timeout or guard drop.
+    /// A bounded `active` poll and the channel-disable bit do not supply that
+    /// proof. Ensure DMA and CPU cache visibility throughout the transfer.
+    ///
+    /// ```compile_fail
+    /// # use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver, DmaFrame, DmaPeripheral, PeriDmaCtl};
+    /// fn unchecked(driver: DmaDriver<'static, Dma0>, channel: DmaChannel,
+    ///              data: &'static [u8], ctl: PeriDmaCtl) {
+    ///     let _ = driver.start_mem_to_peripheral(channel, data, 0,
+    ///         DmaPeripheral::Spi0Tx, DmaFrame::Byte, ctl);
+    /// }
+    /// ```
     #[instability::unstable]
-    pub fn start_mem_to_peripheral<SRC>(
+    pub unsafe fn start_mem_to_peripheral<SRC>(
         mut self,
         channel: DmaChannel,
         src: SRC,
@@ -1198,8 +1217,13 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// byte buffer and its length cannot be interpreted as a halfword count.
     /// The destination address and transfer length must each be a nonzero
     /// multiple of [`DMA_ALIGN`] so invalidation covers only owned cache lines.
+    ///
+    /// # Safety
+    /// The TX method's peripheral address, request routing, exclusivity,
+    /// buffer lifetime, independent drain and cache visibility requirements
+    /// also apply. Destination cache lines must be exclusively held until drain.
     #[instability::unstable]
-    pub fn start_peripheral_to_mem<DST>(
+    pub unsafe fn start_peripheral_to_mem<DST>(
         mut self,
         channel: DmaChannel,
         mut dst: DST,
@@ -1554,7 +1578,8 @@ mod tests {
         // A 'static buffer (the 'static driver requires SRC: 'static).
         static BUF: [u8; 5000] = [0; 5000]; // 5000 > 0xFFF (4095)
         let peri_dis = PeriDmaCtl::new(0x4402_0000, PeriKind::Spi, DmaDirection::Tx);
-        let r = dma.start_mem_to_peripheral(ch, &BUF[..], 0x4402_0060, DmaPeripheral::Spi0Tx, DmaFrame::Byte, peri_dis);
+        // SAFETY: the oversized transfer is rejected before any hardware access.
+        let r = unsafe { dma.start_mem_to_peripheral(ch, &BUF[..], 0x4402_0060, DmaPeripheral::Spi0Tx, DmaFrame::Byte, peri_dis) };
         assert!(matches!(r, Err(DmaError::TransferTooLarge)), "expected TransferTooLarge");
     }
 
@@ -1564,16 +1589,18 @@ mod tests {
         static SRC: [u8; 8] = [0x5a; 8];
         let dst: &'static mut [u8] = std::boxed::Box::leak(std::boxed::Box::new([0xa5; 8]));
         let dma: DmaDriver<'static, Dma0> = DmaDriver::new_for_test();
-        let tx = dma.start_mem_to_peripheral(
+        // SAFETY: unsupported frames are rejected before any hardware access.
+        let tx = unsafe { dma.start_mem_to_peripheral(
             DmaChannel { logical: 0 }, &SRC[..], 0, DmaPeripheral::Spi0Tx, DmaFrame::HalfWord,
             PeriDmaCtl::new(0, PeriKind::Spi, DmaDirection::Tx),
-        );
+        ) };
         assert!(matches!(tx, Err(DmaError::UnsupportedFrame)));
         let dma: DmaDriver<'static, Dma0> = DmaDriver::new_for_test();
-        let rx = dma.start_peripheral_to_mem(
+        // SAFETY: unsupported frames are rejected before any hardware access.
+        let rx = unsafe { dma.start_peripheral_to_mem(
             DmaChannel { logical: 0 }, dst, 0, DmaPeripheral::Spi0Rx, DmaFrame::HalfWord,
             PeriDmaCtl::new(0, PeriKind::Spi, DmaDirection::Rx),
-        );
+        ) };
         assert!(matches!(rx, Err(DmaError::UnsupportedFrame)));
     }
 
@@ -1601,10 +1628,11 @@ mod tests {
 
         let dst: &'static mut [u8] = std::boxed::Box::leak(std::boxed::Box::new([0; 1]));
         let dma: DmaDriver<'static, Dma0> = DmaDriver::new_for_test();
-        let result = dma.start_peripheral_to_mem(
+        // SAFETY: a one-byte destination is rejected before any hardware access.
+        let result = unsafe { dma.start_peripheral_to_mem(
             DmaChannel { logical: 0 }, dst, 0, DmaPeripheral::Spi0Rx, DmaFrame::Byte,
             PeriDmaCtl::new(0, PeriKind::Spi, DmaDirection::Rx),
-        );
+        ) };
         assert!(matches!(result, Err(DmaError::InvalidCacheRange)));
     }
 
