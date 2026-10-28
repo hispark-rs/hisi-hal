@@ -624,6 +624,12 @@ use embedded_dma::{ReadBuffer, WriteBuffer};
 /// [`crate::cache::invalidate_range`]).
 pub const DMA_ALIGN: usize = 32;
 
+// An invalidation must not discard dirty data outside the owned destination.
+#[cfg(feature = "chip-ws63")]
+fn cache_line_destination(addr: usize, bytes: usize) -> bool {
+    bytes != 0 && addr.is_multiple_of(DMA_ALIGN) && bytes.is_multiple_of(DMA_ALIGN) && addr.checked_add(bytes).is_some()
+}
+
 /// Bounded completion poll for [`Transfer::wait`] — a wedged channel returns control
 /// (the transfer is then treated as done) instead of spinning the CPU forever.
 const DMA_WAIT_LOOPS: u32 = 5_000_000;
@@ -640,8 +646,9 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// invalidated on `wait()` (the WS63 core is non-coherent), so the cache
     /// maintenance lives inside the type rather than being a caller obligation.
     ///
-    /// The DMA beat is a 32-bit word (`Word = u32`); buffers should be
-    /// [`DMA_ALIGN`]-aligned. The transfer length is `min(src.len(), dst.len())` words.
+    /// The DMA beat is a 32-bit word (`Word = u32`); the transfer length is
+    /// `min(src.len(), dst.len())` words. On WS63 the destination address and
+    /// transfer length must each be a nonzero multiple of [`DMA_ALIGN`].
     ///
     /// [`wait`]: Transfer::wait
     ///
@@ -674,6 +681,11 @@ impl<'d> DmaDriver<'d, Dma0> {
             None => return Err(DmaStartError { error: DmaError::TransferTooLarge, driver: self, channel, src, dst }),
         };
         let bytes = words * core::mem::size_of::<u32>();
+
+        #[cfg(feature = "chip-ws63")]
+        if !cache_line_destination(dst_ptr as usize, bytes) {
+            return Err(DmaStartError { error: DmaError::InvalidCacheRange, driver: self, channel, src, dst });
+        }
 
         self.enable_controller();
 
@@ -887,6 +899,8 @@ pub enum DmaError {
     TransferTooLarge,
     /// A byte-buffer entry point cannot safely express halfword beats.
     UnsupportedFrame,
+    /// Destination invalidation would affect a partial cache line or wrap.
+    InvalidCacheRange,
     /// The channel did not auto-clear its enable bit within `DMA_WAIT_LOOPS` (a
     /// wedged transfer — e.g. a peripheral whose DMA-enable was never set, or a
     /// handshake mismatch). Cancellation was attempted, but drain is not proven.
@@ -1182,6 +1196,8 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// [`start_mem_to_peripheral`] for the lifetime / cap / teardown contract.
     /// Halfword frames are rejected before DMA access because this API takes a
     /// byte buffer and its length cannot be interpreted as a halfword count.
+    /// The destination address and transfer length must each be a nonzero
+    /// multiple of [`DMA_ALIGN`] so invalidation covers only owned cache lines.
     #[instability::unstable]
     pub fn start_peripheral_to_mem<DST>(
         mut self,
@@ -1206,6 +1222,10 @@ impl<'d> DmaDriver<'d, Dma0> {
             return Err(DmaError::TransferTooLarge);
         }
         let bytes = beats;
+
+        if !cache_line_destination(dst_ptr as usize, bytes) {
+            return Err(DmaError::InvalidCacheRange);
+        }
 
         // No clean before launch — the CPU hasn't written the RX destination; the DMA
         // will. invalidate_range runs on wait() AFTER completion. The peripheral DATA
@@ -1555,6 +1575,37 @@ mod tests {
             PeriDmaCtl::new(0, PeriKind::Spi, DmaDirection::Rx),
         );
         assert!(matches!(rx, Err(DmaError::UnsupportedFrame)));
+    }
+
+    #[cfg(feature = "chip-ws63")]
+    #[test]
+    fn cache_destination_rejects_partial_empty_and_wrapping_ranges() {
+        assert!(cache_line_destination(0x1000, 32));
+        assert!(cache_line_destination(0x1000, 64));
+        assert!(!cache_line_destination(0x1001, 32));
+        assert!(!cache_line_destination(0x1000, 31));
+        assert!(!cache_line_destination(0x1000, 0));
+        assert!(!cache_line_destination(usize::MAX & !(DMA_ALIGN - 1), 32));
+    }
+
+    #[cfg(feature = "chip-ws63")]
+    #[test]
+    fn unaligned_destination_is_rejected_before_dma_mmio() {
+        #[repr(align(32))]
+        struct Aligned([u32; 16]);
+        static SRC: [u32; 8] = [0; 8];
+        let dst = std::boxed::Box::leak(std::boxed::Box::new(Aligned([0; 16])));
+        let dma: DmaDriver<'static, Dma0> = DmaDriver::new_for_test();
+        let result = dma.start_mem_to_mem(DmaChannel { logical: 0 }, &SRC[..], &mut dst.0[1..9]);
+        assert!(matches!(result, Err(ref e) if e.error() == DmaError::InvalidCacheRange));
+
+        let dst: &'static mut [u8] = std::boxed::Box::leak(std::boxed::Box::new([0; 1]));
+        let dma: DmaDriver<'static, Dma0> = DmaDriver::new_for_test();
+        let result = dma.start_peripheral_to_mem(
+            DmaChannel { logical: 0 }, dst, 0, DmaPeripheral::Spi0Rx, DmaFrame::Byte,
+            PeriDmaCtl::new(0, PeriKind::Spi, DmaDirection::Rx),
+        );
+        assert!(matches!(result, Err(DmaError::InvalidCacheRange)));
     }
 
     #[cfg(feature = "chip-ws63")]
