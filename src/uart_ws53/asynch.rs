@@ -265,6 +265,38 @@ mod tests {
         assert!(!io.armed);
         assert_eq!(Arc::strong_count(&last), 1);
     }
+
+    #[test]
+    fn interrupt_during_disarm_schedules_repoll_before_pending_return() {
+        struct Race<'a> {
+            slot: &'a Cell<Option<Waker>>,
+            interrupt_once: bool,
+        }
+        impl RxIo for Race<'_> {
+            type Error = u8;
+            fn read(&mut self) -> nb::Result<u8, u8> {
+                Err(nb::Error::WouldBlock)
+            }
+            fn arm(&mut self) {}
+            fn disarm(&mut self) {
+                if core::mem::take(&mut self.interrupt_once) {
+                    // Model the ISR taking and waking the newly registered
+                    // waker before the pending poll returns.
+                    self.slot.take().unwrap().wake();
+                }
+            }
+        }
+        let slot = Cell::new(None);
+        let count = Arc::new(Counter(AtomicUsize::new(0)));
+        let mut io = Race { slot: &slot, interrupt_once: true };
+        assert!(poll_rx(&mut io, &slot, Waker::from(count.clone())).0.is_pending());
+        assert_eq!(count.0.load(Ordering::SeqCst), 1);
+        assert!(slot.take().is_none());
+        // The wake schedules a later poll; that poll installs a fresh waker.
+        assert!(poll_rx(&mut io, &slot, Waker::from(count.clone())).0.is_pending());
+        slot.take().unwrap().wake();
+        assert_eq!(count.0.load(Ordering::SeqCst), 2);
+    }
 }
 
 /// One-shot TX notification. FIFO availability is not line drain completion.
@@ -518,6 +550,34 @@ mod tx_tests {
         assert_eq!(poll_tx(&mut io, &slot, TxOperation::Write(1), Waker::from(last.clone())).0, Poll::Ready(()));
         assert_eq!(io.writes, [1]);
         assert_eq!(Arc::strong_count(&last), 1);
+    }
+
+    #[test]
+    fn interrupt_during_disarm_schedules_repoll_without_writing() {
+        struct Race<'a> {
+            slot: &'a Cell<Option<Waker>>,
+            interrupt_once: bool,
+        }
+        impl TxIo for Race<'_> {
+            fn ready(&mut self, _: TxOperation) -> bool {
+                false
+            }
+            fn arm(&mut self) {}
+            fn disarm(&mut self) {
+                if core::mem::take(&mut self.interrupt_once) {
+                    self.slot.take().unwrap().wake();
+                }
+            }
+        }
+        let slot = Cell::new(None);
+        let count = Arc::new(Count(AtomicUsize::new(0)));
+        let mut io = Race { slot: &slot, interrupt_once: true };
+        assert!(poll_tx(&mut io, &slot, TxOperation::Write(0xa5), Waker::from(count.clone())).0.is_pending());
+        assert_eq!(count.0.load(Ordering::SeqCst), 1);
+        assert!(slot.take().is_none());
+        assert!(poll_tx(&mut io, &slot, TxOperation::Write(0xa5), Waker::from(count.clone())).0.is_pending());
+        slot.take().unwrap().wake();
+        assert_eq!(count.0.load(Ordering::SeqCst), 2);
     }
     #[test]
     fn fifo_notification_does_not_complete_flush_until_serializer_is_empty() {

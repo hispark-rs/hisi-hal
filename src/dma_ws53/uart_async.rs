@@ -207,7 +207,14 @@ impl<T: Instance> Drop for AsyncTransmitterIdle<'_, '_, T> {
 #[cfg(all(test, not(target_arch = "riscv32")))]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
+    use std::{
+        collections::VecDeque,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::Wake,
+    };
     struct Io {
         samples: VecDeque<Result<bool, Error>>,
         armed: bool,
@@ -245,6 +252,39 @@ mod tests {
         io.samples.push_back(Ok(true));
         assert_eq!(poll_idle(&mut io, &slot, Waker::noop().clone()), Poll::Ready(Ok(())));
         assert!(!io.armed && slot.take().is_none());
+    }
+    #[test]
+    fn interrupt_during_disarm_requests_a_repoll_before_pending() {
+        struct Count(AtomicUsize);
+        impl Wake for Count {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        struct Race<'a> {
+            slot: &'a Cell<Option<Waker>>,
+            interrupt_once: bool,
+        }
+        impl IdleIo for Race<'_> {
+            fn observe(&mut self) -> Result<bool, Error> {
+                Ok(false)
+            }
+            fn arm(&mut self) {}
+            fn disarm(&mut self) {
+                if core::mem::take(&mut self.interrupt_once) {
+                    self.slot.take().unwrap().wake();
+                }
+            }
+        }
+        let slot = Cell::new(None);
+        let count = Arc::new(Count(AtomicUsize::new(0)));
+        let mut io = Race { slot: &slot, interrupt_once: true };
+        assert!(poll_idle(&mut io, &slot, Waker::from(count.clone())).is_pending());
+        assert_eq!(count.0.load(Ordering::SeqCst), 1);
+        assert!(slot.take().is_none());
+        assert!(poll_idle(&mut io, &slot, Waker::from(count.clone())).is_pending());
+        slot.take().unwrap().wake();
+        assert_eq!(count.0.load(Ordering::SeqCst), 2);
     }
     #[test]
     fn line_error_before_or_during_arm_is_returned_and_notification_removed() {
