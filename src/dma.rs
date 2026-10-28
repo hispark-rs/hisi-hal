@@ -745,9 +745,8 @@ impl<'d, SRC, DST> Transfer<'d, SRC, DST> {
     /// `Drop` runs.
     ///
     /// On `DMA_WAIT_LOOPS` exhaustion, halt, bounded active polling and disable
-    /// are attempted before buffers are handed back. The active poll can expire,
-    /// so DMA bus drain is not established. A wedged transfer is reported as
-    /// [`DmaError::Timeout`] with the driver, channel token, and buffers returned.
+    /// are attempted, but the driver, channel and buffers remain retained in the
+    /// timeout error. The active poll can expire, so DMA bus drain is not established.
     pub fn wait(self) -> DmaWaitResult<'d, SRC, DST> {
         // Skip the abort-on-drop: the transfer is completing normally.
         let mut this = ManuallyDrop::new(self);
@@ -766,6 +765,19 @@ impl<'d, SRC, DST> Transfer<'d, SRC, DST> {
         let timed_out = this.driver.channel_enabled_raw(ch);
         if timed_out {
             quiesce_channel(&mut this.driver, ch);
+            // SAFETY: the outer guard is ManuallyDrop; each owner is read exactly
+            // once and deliberately retained without invalidating the destination.
+            return unsafe {
+                Err(DmaWaitError {
+                    error: DmaError::Timeout,
+                    driver: ManuallyDrop::new(core::ptr::read(&this.driver)),
+                    channel: ManuallyDrop::new(core::ptr::read(&this.channel)),
+                    src: ManuallyDrop::new(core::ptr::read(&this.src)),
+                    dst: ManuallyDrop::new(core::ptr::read(&this.dst)),
+                    dst_addr: this.dst_addr,
+                    bytes: this.bytes,
+                })
+            };
         }
         // Drop the stale destination cache lines so the CPU re-reads what DMA wrote.
         #[cfg(feature = "chip-ws63")]
@@ -779,11 +791,7 @@ impl<'d, SRC, DST> Transfer<'d, SRC, DST> {
             let channel = core::ptr::read(&this.channel);
             let src = core::ptr::read(&this.src);
             let dst = core::ptr::read(&this.dst);
-            if timed_out {
-                Err(DmaWaitError { error: DmaError::Timeout, driver, channel, src, dst })
-            } else {
-                Ok((driver, channel, src, dst))
-            }
+            Ok((driver, channel, src, dst))
         }
     }
 }
@@ -816,14 +824,24 @@ impl<'d, SRC, DST> DmaStartError<'d, SRC, DST> {
     }
 }
 
-/// Resources returned when a started DMA transfer times out while waiting.
+/// Resources retained when a started DMA transfer times out. Dropping the error
+/// intentionally retains all resources, including the channel reservation.
+///
+/// ```compile_fail
+/// use hisi_hal::dma::DmaWaitError;
+/// fn recover(e: DmaWaitError<'static, (), ()>) { let _ = e.into_parts(); }
+/// ```
 #[instability::unstable]
 pub struct DmaWaitError<'d, SRC, DST> {
     error: DmaError,
-    driver: DmaDriver<'d, Dma0>,
-    channel: DmaChannel,
-    src: SRC,
-    dst: DST,
+    driver: ManuallyDrop<DmaDriver<'d, Dma0>>,
+    channel: ManuallyDrop<DmaChannel>,
+    src: ManuallyDrop<SRC>,
+    dst: ManuallyDrop<DST>,
+    #[cfg_attr(not(feature = "chip-ws63"), allow(dead_code))]
+    dst_addr: usize,
+    #[cfg_attr(not(feature = "chip-ws63"), allow(dead_code))]
+    bytes: usize,
 }
 
 impl<SRC, DST> core::fmt::Debug for DmaWaitError<'_, SRC, DST> {
@@ -838,10 +856,20 @@ impl<'d, SRC, DST> DmaWaitError<'d, SRC, DST> {
         self.error
     }
 
-    /// Recover the driver, claimed channel, and buffers after attempted
-    /// cancellation and cache maintenance. DMA bus drain is not yet established.
-    pub fn into_parts(self) -> (DmaError, DmaDriver<'d, Dma0>, DmaChannel, SRC, DST) {
-        (self.error, self.driver, self.channel, self.src, self.dst)
+    /// Recover retained resources and invalidate the destination after external
+    /// verification. No channel reset or additional hardware check is performed.
+    ///
+    /// # Safety
+    /// Independently prove that the channel, old peripheral requests and every
+    /// bus transaction have stopped and cannot restart until reconfiguration.
+    /// Prove destination cache-line exclusivity and perform any required bus or
+    /// CPU synchronization. The timeout, active bit and channel disable alone do
+    /// not establish these facts. Until then none of the buffers may be accessed.
+    pub unsafe fn into_parts(self) -> (DmaError, DmaDriver<'d, Dma0>, DmaChannel, SRC, DST) {
+        #[cfg(feature = "chip-ws63")]
+        unsafe { crate::cache::invalidate_range(self.dst_addr, self.bytes) };
+        (self.error, ManuallyDrop::into_inner(self.driver), ManuallyDrop::into_inner(self.channel),
+            ManuallyDrop::into_inner(self.src), ManuallyDrop::into_inner(self.dst))
     }
 }
 
@@ -1318,8 +1346,9 @@ impl<'d, BUF> PeripheralTransfer<'d, BUF> {
     ///
     /// On `DMA_WAIT_LOOPS` exhaustion the channel is cancel-then-quiesced first, then
     /// [`Err(DmaError::Timeout)`](DmaError::Timeout) is returned (the driver, channel,
-    /// and buffer are dropped — the channel claim is released). Bounded polling
-    /// does not establish that outstanding bus accesses have stopped.
+    /// and buffer are deliberately retained. This legacy API has no recovery
+    /// handle for a timed-out peripheral transfer. Bounded polling does not
+    /// establish that outstanding bus accesses have stopped.
     #[instability::unstable]
     pub fn wait(self) -> Result<(DmaDriver<'d, Dma0>, DmaChannel, BUF), DmaError> {
         // Skip the abort-on-drop: the transfer is completing normally.
@@ -1342,15 +1371,8 @@ impl<'d, BUF> PeripheralTransfer<'d, BUF> {
             // `&mut *this` one at a time.
             this.peri_dis.disable();
             quiesce_channel(&mut this.driver, ch);
-            if this.dir == DmaDirection::Rx {
-                unsafe {
-                    crate::cache::invalidate_range(this.mem_addr, this.bytes);
-                }
-            }
-            // Drop driver + channel (its Drop releases the claim bitmask) + buf.
-            // `into_inner` unwraps the ManuallyDrop so the inner values actually drop
-            // (otherwise the channel claim would leak on the timeout path).
-            drop(ManuallyDrop::into_inner(this));
+            // Keep the ManuallyDrop guard and all its resources retained; do not
+            // invalidate a destination that might still receive posted writes.
             return Err(DmaError::Timeout);
         }
 
@@ -1409,6 +1431,33 @@ impl DmaChannelConfig {
 #[cfg(all(test, not(target_arch = "riscv32")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timed_out_resources_are_retained_until_explicit_unsafe_recovery() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        struct Counted(Arc<AtomicUsize>);
+        impl Drop for Counted {
+            fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); }
+        }
+        fn retained(drops: &Arc<AtomicUsize>) -> DmaWaitError<'static, Counted, Counted> {
+            DmaWaitError {
+                error: DmaError::Timeout,
+                driver: ManuallyDrop::new(DmaDriver::new_for_test()),
+                channel: ManuallyDrop::new(DmaChannel { logical: 0 }),
+                src: ManuallyDrop::new(Counted(drops.clone())),
+                dst: ManuallyDrop::new(Counted(drops.clone())),
+                dst_addr: 0,
+                bytes: 0,
+            }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        drop(retained(&drops));
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        // SAFETY: host-only synthetic resources were never given to a DMA engine.
+        let (_, _, _, src, dst) = unsafe { retained(&drops).into_parts() };
+        drop((src, dst));
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+    }
 
     // These request identities exist only in the WS63 peripheral-DMA backend.
     // Keep the generic controller/configuration tests below enabled for BS2X.
