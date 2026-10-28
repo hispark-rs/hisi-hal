@@ -98,7 +98,7 @@ impl<'d> TcxoDriver<'d> {
         let c1 = self.regs().tcxo_count1().read().bits() as u64;
         let c2 = self.regs().tcxo_count2().read().bits() as u64;
         let c3 = self.regs().tcxo_count3().read().bits() as u64;
-        Some((c3 << 48) | (c2 << 32) | (c1 << 16) | c0)
+        Some(crate::tcxo_words::join([c3, c2, c1, c0]))
     }
 
     /// Read the lower 32 bits of the counter (faster, triggers refresh).
@@ -159,7 +159,7 @@ mod tests {
         let c1: u64 = 0x5678;
         let c2: u64 = 0x9ABC;
         let c3: u64 = 0xDEF0;
-        let counter: u64 = (c3 << 48) | (c2 << 32) | (c1 << 16) | c0;
+        let counter = crate::tcxo_words::join([c3, c2, c1, c0]);
         assert_eq!(counter, 0xDEF0_9ABC_5678_1234);
     }
 
@@ -198,11 +198,7 @@ mod proptests {
             c2 in any::<u16>(),
             c3 in any::<u16>(),
         ) {
-            // Re-derive exactly as the driver does (each reg read widened to u64).
-            let counter: u64 = ((c3 as u64) << 48)
-                | ((c2 as u64) << 32)
-                | ((c1 as u64) << 16)
-                | (c0 as u64);
+            let counter = crate::tcxo_words::join([c3.into(), c2.into(), c1.into(), c0.into()]);
 
             // Each 16-bit lane must round-trip back unchanged.
             prop_assert_eq!((counter & 0xFFFF) as u16, c0);
@@ -221,10 +217,7 @@ mod proptests {
             c2 in any::<u16>(),
             c3 in any::<u16>(),
         ) {
-            let counter: u64 = ((c3 as u64) << 48)
-                | ((c2 as u64) << 32)
-                | ((c1 as u64) << 16)
-                | (c0 as u64);
+            let counter = crate::tcxo_words::join([c3.into(), c2.into(), c1.into(), c0.into()]);
 
             // Reconstruct from the four masked lanes; must equal the original.
             let rebuilt = (counter & 0x0000_0000_0000_FFFF)
@@ -273,10 +266,7 @@ mod proptests {
             c2 in any::<u16>(),
             c3 in any::<u16>(),
         ) {
-            let counter64: u64 = ((c3 as u64) << 48)
-                | ((c2 as u64) << 32)
-                | ((c1 as u64) << 16)
-                | (c0 as u64);
+            let counter64 = crate::tcxo_words::join([c3.into(), c2.into(), c1.into(), c0.into()]);
             let counter32: u32 = ((c1 as u32) << 16) | (c0 as u32);
             prop_assert_eq!((counter64 & 0xFFFF_FFFF) as u32, counter32);
         }

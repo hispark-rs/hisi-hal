@@ -223,9 +223,12 @@ fn poll(io: &mut impl Registers, pending: &mut bool) -> nb::Result<CounterTicks,
     }
     let [high, mid_high, mid_low, low] = io.words_high_to_low();
     *pending = false;
-    Ok(CounterTicks(
-        (u64::from(high) << 48) | (u64::from(mid_high) << 32) | (u64::from(mid_low) << 16) | u64::from(low),
-    ))
+    Ok(CounterTicks(crate::tcxo_words::join([
+        u64::from(high),
+        u64::from(mid_high),
+        u64::from(mid_low),
+        u64::from(low),
+    ])))
 }
 fn snapshot(io: &mut impl Registers, max_polls: NonZeroU16, pending: &mut bool) -> Result<CounterTicks, TcxoError> {
     begin(io, pending)?;

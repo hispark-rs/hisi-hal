@@ -142,6 +142,8 @@ pub mod timer;
 #[path = "timer_ws53.rs"]
 pub mod timer;
 mod timer_math;
+
+mod tcxo_words;
 /// UART serial driver (blocking and `embedded-io`).
 pub mod uart;
 unstable_module! {
