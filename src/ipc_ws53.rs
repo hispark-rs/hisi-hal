@@ -28,11 +28,6 @@ pub const MAX_MESSAGE: usize = 4 + MAX_PAYLOAD;
 #[path = "ipc_ws53/layout.rs"]
 pub mod layout;
 
-/// Defensive IPC18 dispatch and transactional filling of exclusive byte images.
-/// A descriptor/image is not a lease on a live control-core buffer.
-#[path = "ipc_ws53/random_buffer.rs"]
-pub mod random_buffer;
-
 /// Known full enable-word state at the external IPC handoff.
 /// No register read is evidenced by the SDK; the driver adopts this shadow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

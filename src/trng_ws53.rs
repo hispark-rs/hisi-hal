@@ -2,7 +2,7 @@
 //!
 //! The vendor application also supplies random buffers to the control core.
 //! A singleton Rust token alone does not exclude that service. IPC18 image
-//! dispatch lives in `ipc::random_buffer`; live peer handoff, entropy
+//! dispatch belongs to the control-core cooperation layer; live peer handoff, entropy
 //! qualification, platform clock/source initialization and cryptographic RNG
 //! traits are not provided here. `start_sdk_ring` covers only the enabled SDK
 //! application's ring-enable/200us path. The two-word filter is not a continuous
