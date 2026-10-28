@@ -885,6 +885,8 @@ pub enum DmaError {
     /// transfer). The caller must chunk it. (Multi-block LLI chunking is a follow-up;
     /// for 0.5.1 a single-block cap is correct and not a silent truncation.)
     TransferTooLarge,
+    /// A byte-buffer entry point cannot safely express halfword beats.
+    UnsupportedFrame,
     /// The channel did not auto-clear its enable bit within `DMA_WAIT_LOOPS` (a
     /// wedged transfer — e.g. a peripheral whose DMA-enable was never set, or a
     /// handshake mismatch). Cancellation was attempted, but drain is not proven.
@@ -1116,7 +1118,9 @@ impl<'d> DmaDriver<'d, Dma0> {
     ///
     /// Cleans the source cache before launch (non-coherent core) and pins
     /// `peri_data_addr` (a peripheral data register) as the fixed destination. The
-    /// beat width is `frame` (not the mem-to-mem `Word = u32`). The peripheral-side
+    /// Byte buffers currently support only [`DmaFrame::Byte`]. Halfword frames
+    /// require a separately typed buffer API and are rejected before DMA access.
+    /// The peripheral-side
     /// DMA-enable is the caller's responsibility until P1's `with_dma` wires it
     /// (vendor order: configure channel → write watermark → clean → start → set
     /// peripheral DMA-enable); this guard tears it down on `Drop` via `peri_dis`.
@@ -1137,6 +1141,9 @@ impl<'d> DmaDriver<'d, Dma0> {
     where
         SRC: ReadBuffer<Word = u8> + 'static,
     {
+        if frame != DmaFrame::Byte {
+            return Err(DmaError::UnsupportedFrame);
+        }
         let ch = channel.logical;
         // SAFETY: `src` is moved into the returned guard and held until wait(), so the
         // pointer stays valid for the whole transfer.
@@ -1173,6 +1180,8 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// returning a [`PeripheralTransfer`] guard. The destination cache is invalidated
     /// on [`wait`](PeripheralTransfer::wait) AFTER completion. See
     /// [`start_mem_to_peripheral`] for the lifetime / cap / teardown contract.
+    /// Halfword frames are rejected before DMA access because this API takes a
+    /// byte buffer and its length cannot be interpreted as a halfword count.
     #[instability::unstable]
     pub fn start_peripheral_to_mem<DST>(
         mut self,
@@ -1186,6 +1195,9 @@ impl<'d> DmaDriver<'d, Dma0> {
     where
         DST: WriteBuffer<Word = u8> + 'static,
     {
+        if frame != DmaFrame::Byte {
+            return Err(DmaError::UnsupportedFrame);
+        }
         let ch = channel.logical;
         // SAFETY: `dst` is moved into the returned guard and held until wait().
         let (dst_ptr, beats) = unsafe { dst.write_buffer() };
@@ -1524,6 +1536,25 @@ mod tests {
         let peri_dis = PeriDmaCtl::new(0x4402_0000, PeriKind::Spi, DmaDirection::Tx);
         let r = dma.start_mem_to_peripheral(ch, &BUF[..], 0x4402_0060, DmaPeripheral::Spi0Tx, DmaFrame::Byte, peri_dis);
         assert!(matches!(r, Err(DmaError::TransferTooLarge)), "expected TransferTooLarge");
+    }
+
+    #[cfg(feature = "chip-ws63")]
+    #[test]
+    fn byte_buffer_rejects_halfword_in_both_directions_before_mmio() {
+        static SRC: [u8; 8] = [0x5a; 8];
+        let dst: &'static mut [u8] = std::boxed::Box::leak(std::boxed::Box::new([0xa5; 8]));
+        let dma: DmaDriver<'static, Dma0> = DmaDriver::new_for_test();
+        let tx = dma.start_mem_to_peripheral(
+            DmaChannel { logical: 0 }, &SRC[..], 0, DmaPeripheral::Spi0Tx, DmaFrame::HalfWord,
+            PeriDmaCtl::new(0, PeriKind::Spi, DmaDirection::Tx),
+        );
+        assert!(matches!(tx, Err(DmaError::UnsupportedFrame)));
+        let dma: DmaDriver<'static, Dma0> = DmaDriver::new_for_test();
+        let rx = dma.start_peripheral_to_mem(
+            DmaChannel { logical: 0 }, dst, 0, DmaPeripheral::Spi0Rx, DmaFrame::HalfWord,
+            PeriDmaCtl::new(0, PeriKind::Spi, DmaDirection::Rx),
+        );
+        assert!(matches!(rx, Err(DmaError::UnsupportedFrame)));
     }
 
     #[cfg(feature = "chip-ws63")]
