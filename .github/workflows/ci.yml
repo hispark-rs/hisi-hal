@@ -16,6 +16,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
 
 jobs:
+  ws53-pre-release:
+    name: WS53 remote dependency integration (not release qualification)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-09
+          components: rust-src,clippy
+      - run: bash scripts/check-ws53-integration.sh
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
