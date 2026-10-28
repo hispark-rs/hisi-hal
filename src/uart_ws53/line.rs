@@ -46,12 +46,12 @@ impl LineConfig {
         }
         let hz = clock.get() as u64;
         let sampling = if (baud as u64) * 16 <= hz { 16 } else { 8 };
-        let denominator = (baud as u64) * sampling;
-        let integer = hz / denominator;
+        let div64 = super::divisor_in_sixty_fourths(clock.get(), baud, sampling as u8);
+        let integer = div64 >> 6;
         if integer == 0 || integer > u16::MAX as u64 {
             return None;
         }
-        let fraction = ((hz % denominator) * 64 / denominator) as u8;
+        let fraction = (div64 & 63) as u8;
         Some(Self {
             clock,
             requested_baud,

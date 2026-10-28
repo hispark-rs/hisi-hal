@@ -14,6 +14,12 @@ use crate::peripherals::{Uart0, Uart1, Uart2};
 #[path = "uart_ws53.rs"]
 mod ws53;
 use core::marker::PhantomData;
+
+// Compute a divisor in units of 1/64. Callers select the supported sampling
+// mode and supply nonzero baud. u64 covers every u32 clock and baud input.
+const fn divisor_in_sixty_fourths(clock: u32, baud: u32, sampling: u8) -> u64 {
+    (clock as u64) * 64 / ((baud as u64) * (sampling as u64))
+}
 #[cfg(feature = "chip-ws53")]
 pub use ws53::{ReceiveError, ReceiveInterrupt};
 #[cfg(feature = "chip-ws53")]
@@ -154,7 +160,7 @@ impl BaudRate {
             return None;
         }
         // div = (UART_CLOCK_HZ * 4 / baud) >> 6  (the fixed-point form configure uses).
-        let div = ((crate::soc::chip::UART_CLOCK_HZ as u64) * 4 / (baud as u64)) >> 6;
+        let div = divisor_in_sixty_fourths(crate::soc::chip::UART_CLOCK_HZ, baud, 16) >> 6;
         if div < 1 || div > 0xFFFF {
             return None;
         }
@@ -308,7 +314,7 @@ fn configure_uart(port: UartPort, config: &Config) {
     // [0,63] sixty-fourths). Dropping the fraction (old div_fra=0) is fine at high
     // clocks but a significant baud error at the TCXO base — flashboot itself
     // programs a non-zero div_fra. (issue #15)
-    let div64 = ((pclk as u64) * 4 / (baudrate as u64)) as u32; // = div * 64
+    let div64 = divisor_in_sixty_fourths(pclk, baudrate, 16) as u32; // = div * 64
     let div = div64 >> 6;
     let div_fra = div64 & 0x3F;
     let div_l = div & 0xFF;
@@ -857,7 +863,7 @@ mod tests {
     use super::*;
     use crate::soc::chip::UART_CLOCK_HZ;
 
-    // Re-derivation of the pure baud-rate math that `configure_uart` inlines.
+    // Exercise the same pure baud-rate math used by `configure_uart`.
     // div = pclk / (16 * baud) carried as 6-bit fixed point:
     //   div64 = pclk * 4 / baud  (= div * 64), div = div64 >> 6, frac = div64 & 0x3F.
     // The 16-bit divider gives a minimum representable baud of pclk/(16*65535)+1 —
@@ -868,7 +874,7 @@ mod tests {
     /// Returns (div_l, div_h, div_fra) exactly as `configure_uart` would program them
     /// for a valid (already-validated) baud — no clamp, mirroring the tightened path.
     fn baud_regs(baud: u32) -> (u16, u16, u16) {
-        let div64 = ((UART_CLOCK_HZ as u64) * 4 / (baud as u64)) as u32;
+        let div64 = divisor_in_sixty_fourths(UART_CLOCK_HZ, baud, 16) as u32;
         let div = div64 >> 6;
         let div_fra = (div64 & 0x3F) as u16;
         let div_l = (div & 0xFF) as u16;
@@ -1051,14 +1057,14 @@ mod tests {
 
 #[cfg(all(test, not(target_arch = "riscv32")))]
 mod proptests {
-    use super::BaudRate;
+    use super::{BaudRate, divisor_in_sixty_fourths};
     use crate::soc::chip::UART_CLOCK_HZ;
     use proptest::prelude::*;
 
     /// The register triple `configure_uart` programs for a (valid) baud — no clamp,
     /// mirroring the tightened path where `BaudRate` already guaranteed the range.
     fn baud_regs(baud: u32) -> (u16, u16, u16) {
-        let div64 = ((UART_CLOCK_HZ as u64) * 4 / (baud as u64)) as u32;
+        let div64 = divisor_in_sixty_fourths(UART_CLOCK_HZ, baud, 16) as u32;
         let div = div64 >> 6;
         let div_fra = (div64 & 0x3F) as u16;
         let div_l = (div & 0xFF) as u16;
@@ -1067,6 +1073,14 @@ mod proptests {
     }
 
     proptest! {
+        #[test]
+        fn divisor_matches_independent_quotient_remainder(clock in any::<u32>(), baud in 1u32..=u32::MAX, eight in any::<bool>()) {
+            let sampling = if eight { 8u8 } else { 16u8 };
+            let denominator = u64::from(baud) * u64::from(sampling);
+            let clock = u64::from(clock);
+            let expected = (clock / denominator) * 64 + (clock % denominator) * 64 / denominator;
+            prop_assert_eq!(divisor_in_sixty_fourths(clock as u32, baud, sampling), expected);
+        }
         /// Fuzz: `BaudRate::try_new` never panics for any u32 baud (incl. 0) — it
         /// returns `None` out of range instead of clamping or dividing by zero.
         #[test]
