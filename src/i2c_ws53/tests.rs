@@ -315,15 +315,26 @@ fn close_gates_clock_only_after_inactivity_and_is_idempotent() {
     assert!(e.io.trace.borrow().is_empty());
 }
 #[test]
-fn error_kinds_distinguish_address_data_and_arbitration_with_priority() {
+fn error_kinds_preserve_mixed_and_unknown_abort_causes() {
     use embedded_hal::i2c::Error as _;
-    for (detail, kind) in [
-        (1, ErrorKind::NoAcknowledge(NoAcknowledgeSource::Address)),
-        (8, ErrorKind::NoAcknowledge(NoAcknowledgeSource::Data)),
-        (0x1009, ErrorKind::ArbitrationLoss),
-        (0x8000, ErrorKind::Other),
+    for (source, detail, kind) in [
+        (0, 1, ErrorKind::NoAcknowledge(NoAcknowledgeSource::Address)),
+        (0, 7, ErrorKind::NoAcknowledge(NoAcknowledgeSource::Address)),
+        (0, 8, ErrorKind::NoAcknowledge(NoAcknowledgeSource::Data)),
+        (0, 9, ErrorKind::NoAcknowledge(NoAcknowledgeSource::Unknown)),
+        (0, 0x1000, ErrorKind::ArbitrationLoss),
+        (0, 0x5000, ErrorKind::ArbitrationLoss),
+        (2, 0, ErrorKind::Bus),
+        (2, 1, ErrorKind::Other),
+        (1, 0x1000, ErrorKind::Other),
+        (0, 0x1009, ErrorKind::Other),
+        (0, 0x8001, ErrorKind::Other),
+        (0, 0x8000, ErrorKind::Other),
+        (0, 0, ErrorKind::Other),
     ] {
-        assert_eq!(Error::RecoveryFailed(Failure::Abort { source: 0, detail }).kind(), kind);
+        let failure = Failure::Abort { source, detail };
+        assert_eq!(Error::RecoveryFailed(failure).kind(), kind);
+        assert_eq!(Error::Failure(failure).kind(), kind);
     }
     assert_eq!(Error::Failure(Failure::Fifo(2)).kind(), ErrorKind::Overrun);
     assert_eq!(Error::Failure(Failure::Fifo(1)).kind(), ErrorKind::Other);

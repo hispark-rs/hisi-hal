@@ -114,6 +114,8 @@ pub enum Failure {
     /// No progress within the configured poll budget.
     Timeout(Wait),
     /// Raw source and detailed abort words; multiple reasons may coexist.
+    /// The standard error kind conservatively reports mixed or unknown causes
+    /// as `Other` (or mixed address/data NACKs as `NoAcknowledge(Unknown)`).
     Abort {
         /// IC_TX_ABRT_SOURCE word, including any unrecognized bits.
         source: u32,
@@ -139,22 +141,35 @@ pub enum Error {
 impl embedded_hal::i2c::Error for Error {
     fn kind(&self) -> ErrorKind {
         match *self {
-            Self::Failure(Failure::Abort { detail, .. }) | Self::RecoveryFailed(Failure::Abort { detail, .. }) => {
-                if detail & (1 << 12) != 0 {
-                    ErrorKind::ArbitrationLoss
-                } else if detail & 7 != 0 {
-                    ErrorKind::NoAcknowledge(NoAcknowledgeSource::Address)
-                } else if detail & 8 != 0 {
-                    ErrorKind::NoAcknowledge(NoAcknowledgeSource::Data)
-                } else {
-                    ErrorKind::Other
-                }
-            }
+            Self::Failure(Failure::Abort { source, detail })
+            | Self::RecoveryFailed(Failure::Abort { source, detail }) => abort_kind(source, detail),
             Self::Failure(Failure::Fifo(bits)) | Self::RecoveryFailed(Failure::Fifo(bits)) if bits & 0xa != 0 => {
                 ErrorKind::Overrun
             }
             _ => ErrorKind::Other,
         }
+    }
+}
+
+// WS53 v151 exposes separate abort words: SOURCE includes user abort and SDA
+// stuck-low, while SLV_INTX contains NACK/arbitration reasons. Never hide an
+// additional or unknown cause behind a more specific standard error kind.
+fn abort_kind(source: u32, detail: u32) -> ErrorKind {
+    if source == 0x02 && detail == 0 {
+        return ErrorKind::Bus;
+    }
+    if source != 0 {
+        return ErrorKind::Other;
+    }
+    match detail {
+        0x1000 | 0x5000 => ErrorKind::ArbitrationLoss,
+        bits if bits != 0 && bits & !0x0f == 0 => match (bits & 0x07 != 0, bits & 0x08 != 0) {
+            (true, false) => ErrorKind::NoAcknowledge(NoAcknowledgeSource::Address),
+            (false, true) => ErrorKind::NoAcknowledge(NoAcknowledgeSource::Data),
+            (true, true) => ErrorKind::NoAcknowledge(NoAcknowledgeSource::Unknown),
+            _ => ErrorKind::Other,
+        },
+        _ => ErrorKind::Other,
     }
 }
 /// Exclusive SCL/SDA pad permissions for one typed controller instance.
