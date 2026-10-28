@@ -460,6 +460,7 @@ impl<R: Registers, D: DelayNs, W: Word> Engine<R, D, W> {
         }
         let cleanup = self.quiesce();
         if result.is_ok()
+            && (cleanup.is_ok() || self.collision.is_some())
             && let Some(f) = self.fault()
         {
             result = Err(f);
