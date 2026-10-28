@@ -223,8 +223,9 @@ fn wait_transaction<I: TransactionIo>(io: &mut I, limit: u32, ready: impl Fn(&mu
 // bits 0..4 describe NACK, bit 12 arbitration loss; other causes remain raw.
 fn classify_abort(source: u32) -> I2cError {
     const NACK: u32 = 0x1f;
-    const ARBITRATION_LOST: u32 = 1 << 12;
-    if source & ARBITRATION_LOST != 0 {
+    // The SDK says slave arbitration loss (bit14) also asserts bit12.
+    // Any other simultaneous or unknown cause must retain the raw word.
+    if source == 0x1000 || source == 0x5000 {
         I2cError::ArbitrationLost
     } else if source & NACK != 0 && source & !NACK == 0 {
         I2cError::Nack
@@ -365,6 +366,11 @@ mod tests {
             (1, I2cError::Nack, ErrorKind::NoAcknowledge(NoAcknowledgeSource::Unknown)),
             (8, I2cError::Nack, ErrorKind::NoAcknowledge(NoAcknowledgeSource::Unknown)),
             (1 << 12, I2cError::ArbitrationLost, ErrorKind::ArbitrationLoss),
+            (0x5000, I2cError::ArbitrationLost, ErrorKind::ArbitrationLoss),
+            (0x4000, I2cError::Abort { source: 0x4000 }, ErrorKind::Other),
+            (0x1001, I2cError::Abort { source: 0x1001 }, ErrorKind::Other),
+            (0x1200, I2cError::Abort { source: 0x1200 }, ErrorKind::Other),
+            (0x5001, I2cError::Abort { source: 0x5001 }, ErrorKind::Other),
             (1 << 9, I2cError::Abort { source: 1 << 9 }, ErrorKind::Other),
             (0, I2cError::Abort { source: 0 }, ErrorKind::Other),
             (1 | (1 << 9), I2cError::Abort { source: 1 | (1 << 9) }, ErrorKind::Other),
@@ -374,6 +380,13 @@ mod tests {
             assert_eq!(actual.kind(), kind);
             assert_eq!(actual, expected);
             assert_eq!(mock.cleared, 1);
+        }
+        // No single additional flag, known or reserved, may be discarded
+        // just because the arbitration-lost bit is also set. Bit14 is the
+        // documented slave-arbitration companion and is checked above.
+        for bit in (0..32).filter(|bit| *bit != 12 && *bit != 14) {
+            let source = 0x1000 | (1u32 << bit);
+            assert_eq!(classify_abort(source), I2cError::Abort { source });
         }
     }
 
