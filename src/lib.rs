@@ -103,7 +103,7 @@ pub mod gpio;
 pub mod gpio;
 /// Interrupt controller access and IRQ enable/handler registration.
 pub mod interrupt;
-/// WS53 IPC doorbells and bounded message formats; shared-ring handoff is external.
+/// WS53 hardware IPC doorbells; shared-memory and firmware protocols are external.
 #[cfg(feature = "chip-ws53")]
 #[path = "ipc_ws53.rs"]
 pub mod ipc;
