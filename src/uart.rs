@@ -144,7 +144,8 @@ pub enum StopBits {
 /// realisable baud is `[~153, 10 000 000]`. `try_new` rejects anything outside that
 /// instead of the old silent low-clamp (`baud < min_baud → min_baud`). Note: a
 /// [`UartClock::Boot`] (the 24/40 MHz flashboot console clock) shifts the realisable
-/// range down — keep boot-console firmware at ordinary baud rates such as 115200.
+/// range down. For a clock-profile-aware check use the `try_new_uartN`
+/// constructors; the existing `new_uartN` constructors remain unchecked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct BaudRate(u32);
@@ -218,6 +219,35 @@ pub struct Config {
     pub clock: UartClock,
 }
 
+/// The selected clock cannot represent the requested baud with a nonzero
+/// 16-bit integer divisor. The clock value is the HAL's selected clock profile,
+/// not a measurement of the physical clock tree.
+#[cfg(not(feature = "chip-ws53"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct BaudClockError {
+    /// Selected clock frequency in hertz.
+    pub clock_hz: u32,
+    /// Requested baud rate.
+    pub baud: u32,
+}
+
+#[cfg(not(feature = "chip-ws53"))]
+fn checked_configure<T, F: FnOnce(&Config, u32)>(
+    token: T,
+    config: &Config,
+    clock_hz: u32,
+    configure: F,
+) -> Result<T, (T, BaudClockError)> {
+    let baud = config.baudrate.baud();
+    let integer = divisor_in_sixty_fourths(clock_hz, baud, 16) >> 6;
+    if !(1..=u16::MAX as u64).contains(&integer) {
+        return Err((token, BaudClockError { clock_hz, baud }));
+    }
+    configure(config, clock_hz);
+    Ok(token)
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -269,34 +299,66 @@ fn write_fifo_dma_levels(r: &crate::soc::pac::uart0::RegisterBlock) {
 
 #[cfg(not(feature = "chip-ws53"))]
 impl<'d> Uart<'d, Uart0<'d>> {
-    /// Create and configure a UART0 driver from the peripheral token and config.
+    /// Create and configure UART0. The selected clock's divisor is not checked;
+    /// use [`Self::try_new_uart0`] when the requested baud may not fit it.
     pub fn new_uart0(_uart: Uart0<'d>, config: Config) -> Self {
         configure_uart(UartPort::Uart0, &config);
         Self { _peripheral: PhantomData }
+    }
+
+    /// Validate the selected clock profile before configuring UART0. On error,
+    /// returns the untouched peripheral token and performs no UART register writes.
+    /// The selected profile must still match the actual stable hardware clock.
+    pub fn try_new_uart0(uart: Uart0<'d>, config: Config) -> Result<Self, (Uart0<'d>, BaudClockError)> {
+        let clock = config.clock.hz();
+        let _uart = checked_configure(uart, &config, clock, |c, hz| configure_uart_at(UartPort::Uart0, c, Some(hz)))?;
+        Ok(Self { _peripheral: PhantomData })
     }
 }
 
 #[cfg(not(feature = "chip-ws53"))]
 impl<'d> Uart<'d, Uart1<'d>> {
-    /// Create and configure a UART1 driver from the peripheral token and config.
+    /// Create and configure UART1. The selected clock's divisor is not checked;
+    /// use [`Self::try_new_uart1`] when the requested baud may not fit it.
     pub fn new_uart1(_uart: Uart1<'d>, config: Config) -> Self {
         configure_uart(UartPort::Uart1, &config);
         Self { _peripheral: PhantomData }
+    }
+
+    /// Checked UART1 constructor; see [`Uart::try_new_uart0`].
+    pub fn try_new_uart1(uart: Uart1<'d>, config: Config) -> Result<Self, (Uart1<'d>, BaudClockError)> {
+        let clock = config.clock.hz();
+        let _uart = checked_configure(uart, &config, clock, |c, hz| configure_uart_at(UartPort::Uart1, c, Some(hz)))?;
+        Ok(Self { _peripheral: PhantomData })
     }
 }
 
 #[cfg(not(feature = "chip-ws53"))]
 impl<'d> Uart<'d, Uart2<'d>> {
-    /// Create and configure a UART2 driver from the peripheral token and config.
+    /// Create and configure UART2. The selected clock's divisor is not checked;
+    /// use [`Self::try_new_uart2`] when the requested baud may not fit it.
     #[instability::unstable]
     pub fn new_uart2(_uart: Uart2<'d>, config: Config) -> Self {
         configure_uart(UartPort::Uart2, &config);
         Self { _peripheral: PhantomData }
     }
+
+    /// Checked UART2 constructor; see [`Uart::try_new_uart0`].
+    #[instability::unstable]
+    pub fn try_new_uart2(uart: Uart2<'d>, config: Config) -> Result<Self, (Uart2<'d>, BaudClockError)> {
+        let clock = config.clock.hz();
+        let _uart = checked_configure(uart, &config, clock, |c, hz| configure_uart_at(UartPort::Uart2, c, Some(hz)))?;
+        Ok(Self { _peripheral: PhantomData })
+    }
 }
 
 #[cfg(not(feature = "chip-ws53"))]
 fn configure_uart(port: UartPort, config: &Config) {
+    configure_uart_at(port, config, None);
+}
+
+#[cfg(not(feature = "chip-ws53"))]
+fn configure_uart_at(port: UartPort, config: &Config, selected_clock: Option<u32>) {
     let r = uart_regs(port);
 
     // Enable divisor-latch access only while programming the baud divider.
@@ -308,7 +370,7 @@ fn configure_uart(port: UartPort, config: &Config) {
     // PLL base, so no runtime clamp is needed (and `baud()` is never 0 → no div0).
     // `UartClock::Boot` selects the pre-`clock_init` flashboot console clock; the
     // default `Pll` keeps the normal 160 MHz PLL base.
-    let pclk = config.clock.hz();
+    let pclk = selected_clock.unwrap_or_else(|| config.clock.hz());
     let baudrate = config.baudrate.baud();
     // div = pclk / (16 * baud), as fixed-point with 6 fractional bits (div_fra ∈
     // [0,63] sixty-fourths). Dropping the fraction (old div_fra=0) is fine at high
@@ -862,6 +924,48 @@ pub use asynch_impl::on_interrupt;
 mod tests {
     use super::*;
     use crate::soc::chip::UART_CLOCK_HZ;
+
+    #[cfg(not(feature = "chip-ws53"))]
+    #[test]
+    fn checked_clock_rejects_invalid_divisors_without_configuring_or_losing_token() {
+        let calls = core::cell::Cell::new(0);
+        let mut config = Config { baudrate: BaudRate::try_new(1_000_000).unwrap(), ..Config::default() };
+        let rejected = checked_configure(42u8, &config, 8_000_000, |_, _| calls.set(calls.get() + 1));
+        assert_eq!(rejected, Err((42, BaudClockError { clock_hz: 8_000_000, baud: 1_000_000 })));
+        assert_eq!(calls.get(), 0);
+        assert_eq!(
+            checked_configure(42u8, &config, 16_000_000, |_, clock| {
+                assert_eq!(clock, 16_000_000);
+                calls.set(calls.get() + 1);
+            }),
+            Ok(42)
+        );
+        assert_eq!(calls.get(), 1);
+        config.baudrate = BaudRate::try_new(200).unwrap();
+        let max_clock = 200 * 16 * u32::from(u16::MAX);
+        assert_eq!(checked_configure(42u8, &config, max_clock, |_, _| calls.set(calls.get() + 1)), Ok(42));
+        assert_eq!(
+            checked_configure(42u8, &config, max_clock + 3200, |_, _| calls.set(calls.get() + 1)),
+            Err((42, BaudClockError { clock_hz: max_clock + 3200, baud: 200 }))
+        );
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[cfg(feature = "chip-ws63")]
+    #[test]
+    fn boot_clock_high_baud_rejection_covers_both_crystal_profiles() {
+        let fast = Config { baudrate: BaudRate::try_new(3_000_000).unwrap(), ..Config::default() };
+        for clock in [24_000_000, 40_000_000] {
+            assert_eq!(
+                checked_configure((), &fast, clock, |_, _| panic!("invalid baud programmed")),
+                Err(((), BaudClockError { clock_hz: clock, baud: 3_000_000 }))
+            );
+        }
+        let normal = Config::default();
+        for clock in [24_000_000, 40_000_000] {
+            assert_eq!(checked_configure((), &normal, clock, |_, selected| assert_eq!(selected, clock)), Ok(()));
+        }
+    }
 
     // Exercise the same pure baud-rate math used by `configure_uart`.
     // div = pclk / (16 * baud) carried as 6-bit fixed point:
