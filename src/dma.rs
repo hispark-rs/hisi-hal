@@ -1139,8 +1139,26 @@ impl DmaDriver<'_, Dma0> {
         }
     }
 
-    /// Enable a claimed DMA channel.
-    pub fn enable_channel(&mut self, channel: &DmaChannel) {
+    /// Enable a claimed DMA channel using its existing hardware configuration.
+    ///
+    /// A channel token alone does not validate the addresses left in its registers:
+    /// a completed transfer may already have returned or released its buffers.
+    ///
+    /// # Safety
+    ///
+    /// The caller must establish that the entire existing channel configuration,
+    /// including linked descriptors, addresses, request routing and transfer size,
+    /// is valid and authorized, and that all memory and peripheral resources remain
+    /// exclusively owned and DMA-accessible until outstanding bus accesses drain.
+    /// Cache maintenance and cross-core coordination are also the caller's duty.
+    ///
+    /// ```compile_fail
+    /// # use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver};
+    /// fn restart(driver: &mut DmaDriver<'_, Dma0>, channel: &DmaChannel) {
+    ///     driver.enable_channel(channel);
+    /// }
+    /// ```
+    pub unsafe fn enable_channel(&mut self, channel: &DmaChannel) {
         self.enable_channel_raw(channel.logical);
     }
 
@@ -1164,8 +1182,21 @@ impl DmaDriver<'_, Dma0> {
         self.halt_channel_raw(channel.logical);
     }
 
-    /// Resume a halted claimed DMA channel.
-    pub fn resume_channel(&mut self, channel: &DmaChannel) {
+    /// Resume a halted claimed DMA channel using its existing configuration.
+    ///
+    /// # Safety
+    ///
+    /// The same resource, address, routing, cache and drain requirements as
+    /// [`Self::enable_channel`] must hold for the resumed operation. In
+    /// particular, halting or disabling a channel does not establish bus drain.
+    ///
+    /// ```compile_fail
+    /// # use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver};
+    /// fn resume(driver: &mut DmaDriver<'_, Dma0>, channel: &DmaChannel) {
+    ///     driver.resume_channel(channel);
+    /// }
+    /// ```
+    pub unsafe fn resume_channel(&mut self, channel: &DmaChannel) {
         self.resume_channel_raw(channel.logical);
     }
 
