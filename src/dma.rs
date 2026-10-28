@@ -649,6 +649,7 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// The DMA beat is a 32-bit word (`Word = u32`); the transfer length is
     /// `min(src.len(), dst.len())` words. On WS63 the destination address and
     /// transfer length must each be a nonzero multiple of [`DMA_ALIGN`].
+    /// A zero-length transfer is rejected before enabling the controller.
     ///
     /// [`wait`]: Transfer::wait
     ///
@@ -676,6 +677,9 @@ impl<'d> DmaDriver<'d, Dma0> {
         let (src_ptr, src_len) = unsafe { src.read_buffer() };
         let (dst_ptr, dst_len) = unsafe { dst.write_buffer() };
         let words = src_len.min(dst_len);
+        if words == 0 {
+            return Err(DmaStartError { error: DmaError::EmptyBuffer, driver: self, channel, src, dst });
+        }
         let transfer_size = match DmaTransferSize::from_beats(words) {
             Some(size) => size,
             None => return Err(DmaStartError { error: DmaError::TransferTooLarge, driver: self, channel, src, dst }),
@@ -893,6 +897,8 @@ fn cancel_then_quiesce(peri_dis: &mut PeriDmaCtl, driver: &mut DmaDriver<'_, Dma
 #[non_exhaustive]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum DmaError {
+    /// A zero-length buffer cannot start a DMA transfer.
+    EmptyBuffer,
     /// The buffer exceeded the 12-bit `trans_size` field (4095 beats per single-block
     /// transfer). The caller must chunk it. (Multi-block LLI chunking is a follow-up;
     /// for 0.5.1 a single-block cap is correct and not a silent truncation.)
@@ -1142,6 +1148,7 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// Returns [`DmaError::TransferTooLarge`] if `src` exceeds 4095 beats (a
     /// single-block DMA `trans_size` cap — chunk the buffer). On `Err` the driver,
     /// channel, and buffer are dropped (the channel claim is released).
+    /// An empty buffer returns [`DmaError::EmptyBuffer`] without starting DMA.
     ///
     /// # Safety
     /// The caller must exclusively own the actual peripheral and establish that
@@ -1181,6 +1188,9 @@ impl<'d> DmaDriver<'d, Dma0> {
         // SAFETY: `src` is moved into the returned guard and held until wait(), so the
         // pointer stays valid for the whole transfer.
         let (src_ptr, beats) = unsafe { src.read_buffer() };
+        if beats == 0 {
+            return Err(DmaError::EmptyBuffer);
+        }
         if beats > 0xFFF {
             // Drop the consumed driver (ZST), channel (releases claim), and buffer.
             drop(channel);
@@ -1217,6 +1227,7 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// byte buffer and its length cannot be interpreted as a halfword count.
     /// The destination address and transfer length must each be a nonzero
     /// multiple of [`DMA_ALIGN`] so invalidation covers only owned cache lines.
+    /// An empty buffer returns [`DmaError::EmptyBuffer`] without starting DMA.
     ///
     /// # Safety
     /// The TX method's peripheral address, request routing, exclusivity,
@@ -1241,6 +1252,9 @@ impl<'d> DmaDriver<'d, Dma0> {
         let ch = channel.logical;
         // SAFETY: `dst` is moved into the returned guard and held until wait().
         let (dst_ptr, beats) = unsafe { dst.write_buffer() };
+        if beats == 0 {
+            return Err(DmaError::EmptyBuffer);
+        }
         if beats > 0xFFF {
             drop(channel);
             return Err(DmaError::TransferTooLarge);
@@ -1613,6 +1627,36 @@ mod tests {
         assert!(!cache_line_destination(0x1000, 31));
         assert!(!cache_line_destination(0x1000, 0));
         assert!(!cache_line_destination(usize::MAX & !(DMA_ALIGN - 1), 32));
+    }
+
+    #[test]
+    fn empty_memory_transfer_is_rejected_before_dma_mmio() {
+        static SRC: [u32; 0] = [];
+        let dst: &'static mut [u32] = std::boxed::Box::leak(std::boxed::Box::new([0; 1]));
+        let dma: DmaDriver<'static, Dma0> = DmaDriver::new_for_test();
+        let result = dma.start_mem_to_mem(DmaChannel { logical: 0 }, &SRC[..], dst);
+        assert!(matches!(result, Err(ref e) if e.error() == DmaError::EmptyBuffer));
+    }
+
+    #[cfg(feature = "chip-ws63")]
+    #[test]
+    fn empty_peripheral_transfers_are_rejected_before_dma_mmio() {
+        static SRC: [u8; 0] = [];
+        let dma: DmaDriver<'static, Dma0> = DmaDriver::new_for_test();
+        // SAFETY: the zero-length transfer is rejected before any hardware access.
+        let tx = unsafe { dma.start_mem_to_peripheral(
+            DmaChannel { logical: 0 }, &SRC[..], 0, DmaPeripheral::Spi0Tx, DmaFrame::Byte,
+            PeriDmaCtl::new(0, PeriKind::Spi, DmaDirection::Tx),
+        ) };
+        assert!(matches!(tx, Err(DmaError::EmptyBuffer)));
+        let dst: &'static mut [u8] = std::boxed::Box::leak(std::boxed::Box::new([]));
+        let dma: DmaDriver<'static, Dma0> = DmaDriver::new_for_test();
+        // SAFETY: the zero-length transfer is rejected before any hardware access.
+        let rx = unsafe { dma.start_peripheral_to_mem(
+            DmaChannel { logical: 0 }, dst, 0, DmaPeripheral::Spi0Rx, DmaFrame::Byte,
+            PeriDmaCtl::new(0, PeriKind::Spi, DmaDirection::Rx),
+        ) };
+        assert!(matches!(rx, Err(DmaError::EmptyBuffer)));
     }
 
     #[cfg(feature = "chip-ws63")]
