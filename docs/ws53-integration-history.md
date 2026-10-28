@@ -996,3 +996,12 @@ explicit without committing machine paths, performs full dependency resolution,
 and refuses to call this package/registry validation. Ordinary registry-only
 availability and release/package checks still need the published dependencies;
 the local-patch development check is not a substitute for them.
+
+WS53 SPI0/QSPI1 blocking and DMA paths now preserve the SDK-documented
+read-clear master collision status (SPI0 WSR bit0, QSPI1 SR bit6). Blocking
+transfers report the complete status and any recognized simultaneous raw IRQ;
+DMA snapshots preserve both status and raw IRQ and retain the existing resource
+and external-drain contract. Host tests inject status-only and simultaneous
+faults, cleanup failures and DMA completion races. The SDK does not establish
+whether a status read affects the separate IRQ latch, and this change does not
+claim real collision, IRQ coupling or electrical timing qualification.

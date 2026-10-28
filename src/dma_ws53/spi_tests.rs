@@ -149,6 +149,23 @@ fn one_failure_domain_arms_receive_then_transmit_before_requests() {
     assert_eq!(e.borrow().len(), 9);
 }
 #[test]
+fn collision_observation_blocks_handoff_and_wins_over_dma_completion() {
+    let collision = Error::SpiCollision { status: 0x1801, raw_interrupt: 0 };
+    let (mut p, events) = pair();
+    p.io.snapshot.error = Some(collision);
+    assert_eq!(p.start(), Err(collision));
+    assert!(events.borrow().is_empty());
+
+    let (mut p, events) = pair();
+    p.start().unwrap();
+    p.tx.io.ready = 1;
+    p.rx.io.ready = 1;
+    p.io.snapshot.error = Some(collision);
+    assert_eq!(p.wait(polls(2), &mut Delay::default()), Err(collision));
+    assert_eq!(&events.borrow()[6..], &["requests-off", "tx-stop", "rx-stop"]);
+    assert!(p.state == State::Retained);
+}
+#[test]
 fn initial_busy_channel_never_touches_spi_or_other_channel() {
     for rx in [false, true] {
         let (mut p, e) = pair();

@@ -394,6 +394,13 @@ pub enum Error {
         /// Raw interrupt snapshot from the selected SPI register layout.
         raw: u32,
     },
+    /// SPI read-clear master-collision status, independently of the IRQ latch.
+    SpiCollision {
+        /// Complete status word sampled before its collision bit was cleared.
+        status: u32,
+        /// Raw interrupt word sampled alongside the status.
+        raw_interrupt: u32,
+    },
     /// Both DMA channels completed but additional unowned RX data remains.
     SpiResidualReceive,
     /// I2C master/address/clock/timing/request readback differs from handoff.

@@ -130,6 +130,14 @@ pub enum Failure {
         /// Normalized embedded-hal error category.
         kind: embedded_hal::spi::ErrorKind,
     },
+    /// Master collision observed in the read-clear status register. This
+    /// observation is independent of the raw interrupt latch.
+    Collision {
+        /// Complete status word captured before the collision bit was cleared.
+        status: u32,
+        /// Raw interrupt snapshot when a recognized interrupt fault was also present.
+        raw_interrupt: Option<u32>,
+    },
     /// Receive data existed without a corresponding word owned by this operation.
     UnexpectedReceive,
 }
@@ -149,6 +157,9 @@ impl embedded_hal::spi::Error for Error {
         match *self {
             Self::Failure(Failure::Hardware { kind, .. }) | Self::RecoveryFailed(Failure::Hardware { kind, .. }) => {
                 kind
+            }
+            Self::Failure(Failure::Collision { .. }) | Self::RecoveryFailed(Failure::Collision { .. }) => {
+                embedded_hal::spi::ErrorKind::ModeFault
             }
             _ => embedded_hal::spi::ErrorKind::Other,
         }
@@ -192,6 +203,12 @@ impl Bus {
             Self::Qspi => Interrupt::QSPI0_2CS,
         }
     }
+}
+
+// The two PAC layouts document different read-clear master-collision bits.
+pub(crate) const fn collision_status(qspi: bool, status: u32) -> Option<u32> {
+    let mask = if qspi { 1 << 6 } else { 1 };
+    if status & mask != 0 { Some(status) } else { None }
 }
 /// Blocking SpiBus with fixed u8/u32 words and caller-managed chip select.
 /// Every successful call waits for all transmitted bits and drains every reply.
@@ -304,6 +321,7 @@ struct Status {
     tx_ready: bool,
     tx_empty: bool,
     rx_ready: bool,
+    collision: Option<u32>,
 }
 trait Registers {
     fn enable_clocks(&mut self);
@@ -322,21 +340,47 @@ struct Engine<R: Registers, D: DelayNs, W: Word> {
     delay: D,
     config: Config,
     state: State,
+    collision: Option<u32>,
     _word: PhantomData<W>,
 }
 impl<R: Registers, D: DelayNs, W: Word> Engine<R, D, W> {
     fn new(io: R, delay: D, config: Config) -> Self {
-        Self { io, delay, config, state: State::Poisoned, _word: PhantomData }
+        Self { io, delay, config, state: State::Poisoned, collision: None, _word: PhantomData }
+    }
+    fn status(&mut self) -> Status {
+        let status = self.io.status();
+        if self.collision.is_none() {
+            self.collision = status.collision;
+        }
+        status
+    }
+    fn fault(&mut self) -> Option<Failure> {
+        if let Some(status) = self.collision.take() {
+            let raw_interrupt = match self.io.fault() {
+                Some(Failure::Hardware { raw, .. }) => Some(raw),
+                _ => None,
+            };
+            Some(Failure::Collision { status, raw_interrupt })
+        } else {
+            self.io.fault()
+        }
     }
     fn ready(&self) -> Result<(), Error> {
         if self.state == State::Ready { Ok(()) } else { Err(Error::Poisoned) }
     }
     fn poll(&mut self, stage: Wait, check_fault: bool, ready: impl Fn(Status) -> bool) -> Result<(), Failure> {
         for n in 0..self.config.polls.get() {
-            if check_fault && let Some(f) = self.io.fault() {
+            if check_fault && let Some(f) = self.fault() {
                 return Err(f);
             }
-            if ready(self.io.status()) {
+            let status = self.status();
+            if check_fault
+                && self.collision.is_some()
+                && let Some(f) = self.fault()
+            {
+                return Err(f);
+            }
+            if ready(status) {
                 return Ok(());
             }
             if n + 1 < self.config.polls.get() {
@@ -354,17 +398,18 @@ impl<R: Registers, D: DelayNs, W: Word> Engine<R, D, W> {
         // Do not infer FIFO capacity from the 36 address aliases. Drain is
         // bounded even if a defective/stopped peripheral never clears RFNE.
         for _ in 0..self.config.polls.get() {
-            if !self.io.status().rx_ready {
+            if !self.status().rx_ready {
                 return Ok(());
             }
             self.io.receive();
         }
-        if self.io.status().rx_ready { Err(Failure::Timeout(Wait::Drain)) } else { Ok(()) }
+        if self.status().rx_ready { Err(Failure::Timeout(Wait::Drain)) } else { Ok(()) }
     }
     fn recover(&mut self) -> Result<(), Error> {
         self.io.enable_clocks();
         self.quiesce().map_err(Error::Failure)?;
         self.io.clear();
+        self.collision = None;
         self.io.configure(self.config, W::DFS);
         self.state = State::Ready;
         Ok(())
@@ -375,12 +420,17 @@ impl<R: Registers, D: DelayNs, W: Word> Engine<R, D, W> {
         }
         self.quiesce().map_err(Error::Failure)?;
         self.io.clear();
+        self.collision = None;
         self.state = State::Closed;
         Ok(())
     }
     fn exchange(&mut self, word: W) -> Result<W, Failure> {
         self.poll(Wait::Transmit, true, |s| s.tx_ready)?;
-        if self.io.status().rx_ready {
+        let status = self.status();
+        if let Some(f) = self.fault() {
+            return Err(f);
+        }
+        if status.rx_ready {
             return Err(Failure::UnexpectedReceive);
         }
         self.io.send(word.into_fifo());
@@ -398,24 +448,25 @@ impl<R: Registers, D: DelayNs, W: Word> Engine<R, D, W> {
             }
             body(self)?;
             self.poll(Wait::Idle, true, |s| !s.busy && s.tx_empty)?;
-            if self.io.status().rx_ready {
+            if self.status().rx_ready {
                 return Err(Failure::UnexpectedReceive);
             }
             Ok(())
         })();
         if result.is_ok()
-            && let Some(f) = self.io.fault()
+            && let Some(f) = self.fault()
         {
             result = Err(f);
         }
         let cleanup = self.quiesce();
+        if result.is_ok()
+            && let Some(f) = self.fault()
+        {
+            result = Err(f);
+        }
         if cleanup.is_ok() {
-            if result.is_ok()
-                && let Some(f) = self.io.fault()
-            {
-                result = Err(f);
-            }
             self.io.clear();
+            self.collision = None;
         }
         match (result, cleanup) {
             (Ok(()), Ok(())) => {
@@ -564,12 +615,15 @@ impl Registers for PacRegisters {
     fn status(&mut self) -> Status {
         regs!(self.0, r, {
             let s = r.status().read();
+            // SDK SPI0 WSR bit0 and QSPI1 SR bit6 are distinct read-clear
+            // master-collision fields. Preserve the entire observed word.
             Status {
                 enabled: r.enable().read().start().bit(),
                 busy: s.busy().bit(),
                 tx_ready: s.tx_not_full().bit(),
                 tx_empty: s.tx_empty().bit(),
                 rx_ready: s.rx_not_empty().bit(),
+                collision: collision_status(matches!(self.0, Bus::Qspi), s.bits()),
             }
         })
     }

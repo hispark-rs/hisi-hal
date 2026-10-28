@@ -368,7 +368,9 @@ impl SpiRegisters for PacSpi {
                 idle: !s.busy().bit() && s.tx_empty().bit() && r.tx_level().read().value().bits() == 0,
                 rx_count: r.rx_level().read().value().bits(),
                 requests: u8::from(dma.tx_enable().bit()) | u8::from(dma.rx_enable().bit()) << 1,
-                error: if e.multi_master().bit()
+                error: if let Some(status) = crate::spi::collision_status(matches!(self.port, Port::Qspi), s.bits()) {
+                    Some(Error::SpiCollision { status, raw_interrupt: e.bits() })
+                } else if e.multi_master().bit()
                     || e.rx_overflow().bit()
                     || e.rx_underflow().bit()
                     || e.tx_overflow().bit()

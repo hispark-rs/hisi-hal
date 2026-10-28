@@ -37,6 +37,9 @@ struct Mock {
     fault_on_idle: bool,
     clear_fault_on_disable: bool,
     extra_rx_on_idle: bool,
+    collision_on_idle: bool,
+    collision_on_disable: bool,
+    collision_latched: Option<u32>,
 }
 fn fault() -> Failure {
     Failure::Hardware { raw: 0x82, kind: embedded_hal::spi::ErrorKind::Overrun }
@@ -64,6 +67,10 @@ impl Registers for Mock {
             if self.late_fault && self.sent > 0 {
                 self.fault = Some(fault());
             }
+            if self.collision_on_disable && self.sent > 0 {
+                self.collision_latched = Some(0x1801);
+                self.collision_on_disable = false;
+            }
         }
     }
     fn select(&mut self, on: bool) {
@@ -84,6 +91,10 @@ impl Registers for Mock {
                 self.rx.push_back(123);
                 self.extra_rx_on_idle = false;
             }
+            if self.collision_on_idle {
+                self.collision_latched = Some(0x1801);
+                self.collision_on_idle = false;
+            }
         }
         Status {
             enabled: self.enabled,
@@ -91,6 +102,7 @@ impl Registers for Mock {
             tx_ready: !self.tx_stall,
             tx_empty: !self.pending && !self.retain_tx,
             rx_ready: self.sticky_rx || !self.rx.is_empty(),
+            collision: self.collision_latched.take(),
         }
     }
     fn fault(&mut self) -> Option<Failure> {
@@ -142,6 +154,49 @@ fn engine<W: Word>() -> Engine<Mock, Delay, W> {
 }
 fn sent<W: Word>(e: &Engine<Mock, Delay, W>) -> Vec<u32> {
     e.io.trace.borrow().iter().filter_map(|x| if let Op::Send(v) = x { Some(*v) } else { None }).collect()
+}
+#[test]
+fn read_clear_collision_survives_status_sampling_and_cleanup() {
+    use embedded_hal::spi::Error as _;
+    for when in 0..3 {
+        let mut e = engine::<u8>();
+        match when {
+            0 => e.io.collision_latched = Some(0x1801),
+            1 => e.io.collision_on_idle = true,
+            _ => e.io.collision_on_disable = true,
+        }
+        let error = e.transfer(&mut [0], &[0x42]).unwrap_err();
+        assert_eq!(error, Error::Failure(Failure::Collision { status: 0x1801, raw_interrupt: None }));
+        assert_eq!(error.kind(), embedded_hal::spi::ErrorKind::ModeFault);
+        assert!(e.io.collision_latched.is_none());
+        assert_eq!(e.state, State::Ready);
+        assert!(e.transfer(&mut [0], &[0x42]).is_ok());
+    }
+}
+#[test]
+fn collision_layout_and_failed_cleanup_preserve_original_observation() {
+    assert_eq!(collision_status(false, 0x1801), Some(0x1801));
+    assert_eq!(collision_status(false, 0x1840), None);
+    assert_eq!(collision_status(true, 0x44), Some(0x44));
+    assert_eq!(collision_status(true, 0x05), None);
+    let mut e = engine::<u8>();
+    e.io.collision_latched = Some(0x1801);
+    e.io.refuse_disable = true;
+    assert_eq!(
+        e.transfer(&mut [0], &[0x42]),
+        Err(Error::RecoveryFailed(Failure::Collision { status: 0x1801, raw_interrupt: None }))
+    );
+    assert_eq!(e.state, State::Poisoned);
+    e.io.refuse_disable = false;
+    assert!(e.recover().is_ok());
+    assert!(e.transfer(&mut [0], &[0x42]).is_ok());
+    let mut e = engine::<u8>();
+    e.io.collision_on_idle = true;
+    e.io.fault_on_idle = true;
+    assert_eq!(
+        e.transfer(&mut [0], &[0x42]),
+        Err(Error::Failure(Failure::Collision { status: 0x1801, raw_interrupt: Some(0x82) }))
+    );
 }
 #[test]
 fn divider_bounds_never_exceed_requested_rate_or_truncate() {
