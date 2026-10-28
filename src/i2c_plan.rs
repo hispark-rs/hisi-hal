@@ -57,6 +57,7 @@ impl Planner {
 #[cfg(all(test, not(target_arch = "riscv32")))]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     #[test]
     fn skips_empty_operations_and_marks_only_direction_changes_and_last_byte() {
         let mut empty = [];
@@ -83,5 +84,37 @@ mod tests {
         let mut empty_planner = Planner::new(&empty_ops);
         assert!(empty_planner.is_empty());
         assert_eq!(empty_planner.next(&empty_ops), None);
+    }
+
+    proptest! {
+        #[test]
+        fn arbitrary_operations_preserve_wire_boundaries(shapes in proptest::collection::vec((any::<bool>(), 0usize..4), 0..12)) {
+            // Each operation has independent storage; lengths and directions are
+            // generated separately, including empty operations between messages.
+            let mut storage = std::vec![[0u8; 3]; shapes.len()];
+            let operations: std::vec::Vec<_> = shapes.iter().zip(storage.iter_mut())
+                .map(|(&(read, len), data)| {
+                    if read { Operation::Read(&mut data[..len]) } else { Operation::Write(&data[..len]) }
+                }).collect();
+            let expected: std::vec::Vec<_> = shapes.iter().enumerate().flat_map(|(op, &(read, len))| {
+                (0..len).map(move |byte| (op, byte, read))
+            }).collect();
+            let mut planner = Planner::new(&operations);
+            prop_assert_eq!(planner.is_empty(), expected.is_empty());
+            let mut actual = std::vec::Vec::new();
+            while let Some(step) = planner.next(&operations) {
+                // Also bounds the test if a regression stops advancing.
+                prop_assert!(actual.len() < expected.len());
+                actual.push(step);
+            }
+            prop_assert_eq!(actual.len(), expected.len());
+            for (index, (step, &(op, byte, read))) in actual.iter().zip(&expected).enumerate() {
+                prop_assert_eq!((step.op, step.byte, step.read), (op, byte, read));
+                let changed_direction = index > 0 && expected[index - 1].2 != read;
+                prop_assert_eq!(step.restart, changed_direction);
+                prop_assert_eq!(step.stop, index + 1 == expected.len());
+            }
+            prop_assert_eq!(planner.next(&operations), None);
+        }
     }
 }
