@@ -13,11 +13,11 @@
 //! Different banks can operate concurrently. The ordinary ISR snapshots/acknowledges status.
 //! The async ISR also masks/disables its source and wakes outside critical sections.
 //! Neither handler polls hardware. Reset and SWD pads cannot become AnyPin values.
+use crate::gpio_traits::{impl_error_type, impl_input_pin, impl_output_pin};
 use crate::interrupt;
 use crate::peripherals::{Gpio0, Gpio1, Gpio2};
 use crate::soc::ws53::pins::GpioLine;
 pub use crate::soc::ws53::pins::{GpioBank, Pad};
-use core::convert::Infallible;
 use core::marker::PhantomData;
 
 /// A pad cannot be attached to this digital GPIO driver.
@@ -426,38 +426,10 @@ impl Drop for Output<'_, '_, '_> {
     }
 }
 
-impl embedded_hal::digital::ErrorType for Input<'_, '_, '_> {
-    type Error = Infallible;
-}
-impl embedded_hal::digital::InputPin for Input<'_, '_, '_> {
-    fn is_high(&mut self) -> Result<bool, Self::Error> {
-        Ok(Input::is_high(self))
-    }
-    fn is_low(&mut self) -> Result<bool, Self::Error> {
-        Ok(!Input::is_high(self))
-    }
-}
-impl embedded_hal::digital::ErrorType for Output<'_, '_, '_> {
-    type Error = Infallible;
-}
-impl embedded_hal::digital::OutputPin for Output<'_, '_, '_> {
-    fn set_high(&mut self) -> Result<(), Self::Error> {
-        Output::set_high(self);
-        Ok(())
-    }
-    fn set_low(&mut self) -> Result<(), Self::Error> {
-        Output::set_low(self);
-        Ok(())
-    }
-}
-impl embedded_hal::digital::StatefulOutputPin for Output<'_, '_, '_> {
-    fn is_set_high(&mut self) -> Result<bool, Self::Error> {
-        Ok(Output::is_set_high(self))
-    }
-    fn is_set_low(&mut self) -> Result<bool, Self::Error> {
-        Ok(!Output::is_set_high(self))
-    }
-}
+impl_error_type!(Input<'_, '_, '_>);
+impl_input_pin!(Input<'_, '_, '_>, Input);
+impl_error_type!(Output<'_, '_, '_>);
+impl_output_pin!(Output<'_, '_, '_>, Output);
 
 #[cfg(all(test, not(target_arch = "riscv32")))]
 mod tests {

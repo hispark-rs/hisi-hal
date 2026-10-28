@@ -83,6 +83,7 @@ compile_error!("hisi-hal: chip-ws53 requires unstable; WS53 is not yet silicon-q
 // macros still land at the crate root for downstream use regardless.
 #[macro_use]
 mod macros;
+mod gpio_traits;
 
 // ── Chip-neutral core (compiles for every chip) ────────────────────────────
 unstable_module! {
