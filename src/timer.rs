@@ -354,6 +354,10 @@ impl OneShotTimer<'_> {
     ///
     /// `count` is in timer clock ticks (TCXO = 24MHz → 1 tick ≈ 41.7ns).
     pub fn start(&mut self, count: u32) {
+        // A previous expiry must not satisfy this new wait. Stop first so an
+        // old period cannot expire between acknowledging it and reprogramming.
+        self.driver.disable(self.channel);
+        self.driver.clear_interrupt(self.channel);
         self.driver.configure(self.channel, TimerMode::OneShot, count);
         self.driver.enable(self.channel);
     }
