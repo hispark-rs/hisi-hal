@@ -22,13 +22,23 @@ cargo generate-lockfile
 features=chip-ws53,rt,unstable,async,embassy,defmt
 cargo test --locked --target x86_64-unknown-linux-gnu --no-default-features --features "$features"
 cargo clippy --locked -Zbuild-std=core,alloc --target riscv32imfc-unknown-none-elf --no-default-features --features "$features" -- -D warnings
-for features in chip-ws53 chip-ws53,chip-ws63,unstable chip-ws53,chip-bs21,unstable; do
+# Cargo resolves optional dependencies even when these old-chip features do not
+# enable WS53. Until ws53-pac is published, preserve their independent host and
+# target regression coverage with the same pinned remote integration overrides.
+# The registry-only release jobs remain separate and must still pass for release.
+for features in chip-ws63,rt,async,embassy,unstable chip-bs21,rt,unstable; do
+    cargo test --locked --target x86_64-unknown-linux-gnu --no-default-features --features "$features"
+    cargo clippy --locked -Zbuild-std=core,alloc --target riscv32imfc-unknown-none-elf --no-default-features --features "$features" -- -D warnings
+done
+for features in chip-ws53 chip-bs21 chip-ws53,chip-ws63,unstable chip-ws53,chip-bs21,unstable; do
     if cargo check --locked --target x86_64-unknown-linux-gnu --no-default-features --features "$features" > "$work/negative.log" 2>&1; then
         printf 'invalid feature combination succeeded: %s\n' "$features" >&2
         exit 1
     fi
     if [[ "$features" == chip-ws53 ]]; then
         grep -q 'chip-ws53 requires unstable' "$work/negative.log"
+    elif [[ "$features" == chip-bs21 ]]; then
+        grep -q 'BS2X support is experimental' "$work/negative.log"
     else
         grep -q 'select exactly ONE chip feature' "$work/negative.log"
     fi
