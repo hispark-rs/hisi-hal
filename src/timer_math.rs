@@ -9,11 +9,13 @@ pub(crate) const fn checked_ticks(value: u32, clock_hz: u32, units_per_second: c
 }
 
 /// Round a delay up to full ticks; the product of two `u32`s fits in `u64`.
+#[cfg(any(not(feature = "chip-ws53"), feature = "async", test))]
 pub(crate) const fn delay_ticks(value: u32, clock_hz: u32, units_per_second: u32) -> u64 {
     (value as u64 * clock_hz as u64).div_ceil(units_per_second as u64)
 }
 
 /// Consume at most one hardware counter period, retaining the remainder.
+#[cfg(any(not(feature = "chip-ws53"), feature = "async", test))]
 pub(crate) fn next_delay_chunk(remaining: &mut u64) -> Option<u32> {
     let chunk = (*remaining).min(u64::from(u32::MAX)) as u32;
     *remaining -= u64::from(chunk);
