@@ -9,6 +9,7 @@
 //! - [`Flex`] — combined input + output driver
 //! - [`AnyPin`] — type-erased pin
 
+use crate::gpio_traits::{impl_error_type, impl_input_pin, impl_output_pin};
 #[cfg(feature = "chip-ws63")]
 use crate::peripherals::IoConfig;
 use crate::peripherals::{Gpio0, Gpio1, Gpio2};
@@ -262,18 +263,8 @@ impl<'d> Input<'d> {
     }
 }
 
-impl embedded_hal::digital::ErrorType for Input<'_> {
-    type Error = core::convert::Infallible;
-}
-
-impl embedded_hal::digital::InputPin for Input<'_> {
-    fn is_high(&mut self) -> Result<bool, Self::Error> {
-        Ok(Input::is_high(self))
-    }
-    fn is_low(&mut self) -> Result<bool, Self::Error> {
-        Ok(Input::is_low(self))
-    }
-}
+impl_error_type!(Input<'_>);
+impl_input_pin!(Input<'_>, Input);
 
 // ── Digital output driver ──────────────────────────────────────────
 
@@ -365,29 +356,8 @@ impl Drop for Output<'_> {
     }
 }
 
-impl embedded_hal::digital::ErrorType for Output<'_> {
-    type Error = core::convert::Infallible;
-}
-
-impl embedded_hal::digital::OutputPin for Output<'_> {
-    fn set_low(&mut self) -> Result<(), Self::Error> {
-        Output::set_low(self);
-        Ok(())
-    }
-    fn set_high(&mut self) -> Result<(), Self::Error> {
-        Output::set_high(self);
-        Ok(())
-    }
-}
-
-impl embedded_hal::digital::StatefulOutputPin for Output<'_> {
-    fn is_set_high(&mut self) -> Result<bool, Self::Error> {
-        Ok(Output::is_set_high(self))
-    }
-    fn is_set_low(&mut self) -> Result<bool, Self::Error> {
-        Ok(!Output::is_set_high(self))
-    }
-}
+impl_error_type!(Output<'_>);
+impl_output_pin!(Output<'_>, Output);
 
 // ── Flex pin driver (combined input + output) ─────────────────────
 
@@ -476,38 +446,9 @@ impl<'d> Flex<'d> {
     }
 }
 
-impl embedded_hal::digital::ErrorType for Flex<'_> {
-    type Error = core::convert::Infallible;
-}
-
-impl embedded_hal::digital::OutputPin for Flex<'_> {
-    fn set_low(&mut self) -> Result<(), Self::Error> {
-        Flex::set_low(self);
-        Ok(())
-    }
-    fn set_high(&mut self) -> Result<(), Self::Error> {
-        Flex::set_high(self);
-        Ok(())
-    }
-}
-
-impl embedded_hal::digital::StatefulOutputPin for Flex<'_> {
-    fn is_set_high(&mut self) -> Result<bool, Self::Error> {
-        Ok(Flex::is_set_high(self))
-    }
-    fn is_set_low(&mut self) -> Result<bool, Self::Error> {
-        Ok(!Flex::is_set_high(self))
-    }
-}
-
-impl embedded_hal::digital::InputPin for Flex<'_> {
-    fn is_high(&mut self) -> Result<bool, Self::Error> {
-        Ok(Flex::is_high(self))
-    }
-    fn is_low(&mut self) -> Result<bool, Self::Error> {
-        Ok(Flex::is_low(self))
-    }
-}
+impl_error_type!(Flex<'_>);
+impl_input_pin!(Flex<'_>, Flex);
+impl_output_pin!(Flex<'_>, Flex);
 
 // ── Internal register access ──────────────────────────────────────
 

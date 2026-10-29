@@ -20,11 +20,9 @@ pub enum SpiMode {
     Mode3,
 }
 
-/// A validated SPI bus clock. The DesignWare SSI divides `SPI_CLOCK_HZ` (160 MHz)
-/// by an even SCKDV in `[2, 0xFFFE]`, so the achievable SCK is
-/// `[SPI_CLOCK_HZ/0xFFFE ≈ 2.4 kHz, SPI_CLOCK_HZ/2 = 80 MHz]`. `try_from_hz` rejects
-/// anything outside that band instead of silently clamping the divider (the old
-/// `frequency: u32` path clamped to 2× / ½× the requested SCK without telling you).
+/// A validated SPI bus clock for the selected chip's source-clock profile.
+/// The controller divides that source by an even SCKDV in `[2, 0xFFFE]`.
+/// Clock setup and actual silicon frequency remain platform responsibilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct SpiHz(u32);
@@ -33,22 +31,32 @@ impl SpiHz {
     /// 1 MHz — the default SPI bus clock.
     pub const ONE_MHZ: SpiHz = SpiHz(1_000_000);
 
-    /// Construct from a target SCK frequency. `None` if the resulting SCKDV
-    /// divider would fall outside `[2, 0xFFFE]` (frequency too high or too low).
+    /// Construct from a maximum SCK frequency. Select the smallest even divider
+    /// whose exact source-profile rate does not exceed it. Return `None` if the
+    /// request is outside the representable range. Actual clock depends on the
+    /// platform establishing the configured source frequency.
     pub const fn try_from_hz(hz: u32) -> Option<Self> {
-        if hz == 0 {
-            return None;
+        match crate::spi_clock::checked_divider(crate::soc::chip::SPI_CLOCK_HZ, hz) {
+            Some(_) => Some(SpiHz(hz)),
+            None => None,
         }
-        let div = crate::soc::chip::SPI_CLOCK_HZ / hz;
-        if div < 2 || div > 0xFFFE {
-            return None;
-        }
-        Some(SpiHz(hz))
     }
 
-    /// The requested SCK frequency in Hz.
+    /// Requested maximum SCK frequency in Hz.
     pub const fn hz(self) -> u32 {
         self.0
+    }
+
+    /// Exact SCKDV register divisor; always even and within `2..=65534`.
+    pub const fn divider(self) -> u16 {
+        self.to_sckdv() as u16
+    }
+
+    /// Source-profile rate rounded down to whole Hz; not a measurement.
+    /// The exact fraction is the selected chip's source clock divided by
+    /// [`divider`](Self::divider). Confirm the source clock on the platform.
+    pub const fn actual_hz(self) -> u32 {
+        crate::soc::chip::SPI_CLOCK_HZ / self.to_sckdv()
     }
 
     /// The even SCKDV divider for this frequency (always in `[2, 0xFFFE]`).
@@ -131,18 +139,14 @@ fn spi_data_reg(regs: &crate::soc::pac::spi0::RegisterBlock) -> &crate::soc::pac
 
 /// SCKDV clock divider for the DesignWare SSI: `SCK = SSI_CLK / SCKDV`.
 ///
-/// Matches the WS63 C SDK (`hal_spi_v151.c`: `clk_div = bus_clk / freq`,
-/// clamped to `SPI_MINUMUM_CLK_DIV` = 2). SCKDV bit 0 is read-only 0, so the
-/// value must be even. There is NO `/2` and NO `-1` (an earlier version of this
-/// driver had both, producing ~2x the requested SCK).
+/// SCKDV bit 0 is read-only 0. Unlike the SDK's floor calculation, rounding up
+/// to an even divisor avoids exceeding the caller's maximum requested rate.
 const fn sckdv(pclk: u32, freq: u32) -> u32 {
-    let freq = if freq == 0 { 1 } else { freq };
-    let div = match pclk / freq {
-        d if d < 2 => 2,
-        d if d > 0xFFFF => 0xFFFF,
-        d => d,
-    };
-    div & !1 // SCKDV LSB is read-only 0 (must be even)
+    match crate::spi_clock::checked_divider(pclk, freq) {
+        Some(value) => value as u32,
+        None if freq > pclk / 2 => 2,
+        None => 0xFFFE,
+    }
 }
 
 /// Bounded busy-wait. Returns [`SpiError::Timeout`] instead of hanging the CPU
@@ -248,28 +252,18 @@ impl<'d, T> Spi<'d, T> {
     /// through the TX/RX FIFOs (zero-padded TX / discarded RX for the shorter slice).
     pub fn transfer(&mut self, write: &[u8], read: &mut [u8]) -> Result<(), SpiError> {
         let r = spi_regs(self.idx);
-        let len = write.len().max(read.len());
-        for i in 0..len {
-            let tx = if i < write.len() { write[i] as u32 } else { 0 };
+        crate::spi_transfer::transfer(read, write, |tx| {
             wait_until(|| r.spi_wsr().read().txfnf().bit_is_set())?;
-            unsafe { spi_data_reg(r).write(|w| w.bits(tx)) };
+            unsafe { spi_data_reg(r).write(|w| w.bits(u32::from(tx))) };
             wait_until(|| r.spi_wsr().read().rxfne().bit_is_set())?;
-            let rx = spi_data_reg(r).read().bits();
-            if i < read.len() {
-                read[i] = rx as u8;
-            }
-        }
-        Ok(())
+            Ok(spi_data_reg(r).read().bits() as u8)
+        })
     }
 
-    /// Write-only transfer: push `data` into the TX FIFO, discarding any RX bytes.
+    /// Write-only transfer in the configured full-duplex mode.
+    /// Wait for and discard each received frame to avoid leaving stale RX data.
     pub fn write(&mut self, data: &[u8]) -> Result<(), SpiError> {
-        let r = spi_regs(self.idx);
-        for &byte in data {
-            wait_until(|| r.spi_wsr().read().txfnf().bit_is_set())?;
-            unsafe { spi_data_reg(r).write(|w| w.bits(byte as u32)) };
-        }
-        Ok(())
+        self.transfer(data, &mut [])
     }
 
     /// Borrow the underlying PAC register block for this SPI instance.
@@ -662,10 +656,17 @@ mod tests {
     use super::sckdv;
     use crate::soc::chip::SPI_CLOCK_HZ;
 
+    #[cfg(feature = "chip-ws63")]
+    const ONE_MHZ_DIVIDER: u32 = 160;
+    #[cfg(feature = "chip-bs21")]
+    const ONE_MHZ_DIVIDER: u32 = 32;
+
     #[test]
     fn test_sckdv_basic() {
-        // 160 MHz / 1 MHz = 160 (SDK writes the divisor directly, no /2, no -1).
-        assert_eq!(sckdv(SPI_CLOCK_HZ, 1_000_000), 160);
+        // Source clocks differ by chip. The divider has neither /2 nor -1.
+        assert_eq!(sckdv(160_000_000, 1_000_000), 160);
+        assert_eq!(sckdv(32_000_000, 1_000_000), 32);
+        assert_eq!(sckdv(SPI_CLOCK_HZ, 1_000_000), ONE_MHZ_DIVIDER);
     }
 
     #[test]
@@ -685,7 +686,8 @@ mod tests {
 
     #[test]
     fn test_sckdv_clamps_at_max() {
-        assert_eq!(sckdv(SPI_CLOCK_HZ, 1000), 0xFFFE);
+        // 100 Hz exceeds the divider range with either 32 or 160 MHz input.
+        assert_eq!(sckdv(SPI_CLOCK_HZ, 100), 0xFFFE);
     }
 
     #[test]
@@ -693,16 +695,24 @@ mod tests {
         use super::SpiHz;
         // 0 and frequencies whose divider leaves [2, 0xFFFE] are rejected.
         assert!(SpiHz::try_from_hz(0).is_none());
-        // Too high: > SPI_CLOCK_HZ/2 (=80 MHz) → div < 2.
+        // Too high: > SPI_CLOCK_HZ/2 → div < 2.
         assert!(SpiHz::try_from_hz(SPI_CLOCK_HZ / 2 + 1).is_none());
         assert!(SpiHz::try_from_hz(SPI_CLOCK_HZ).is_none());
-        // Too low: div > 0xFFFE (1 Hz → 160 000 000 div).
+        // Too low: div > 0xFFFE at 1 Hz for both supported clocks.
         assert!(SpiHz::try_from_hz(1).is_none());
-        // In range: 1 MHz → div 160; the default const agrees.
+        // In range: the default const agrees with this chip's source clock.
         assert_eq!(SpiHz::try_from_hz(1_000_000).unwrap().hz(), 1_000_000);
-        assert_eq!(SpiHz::ONE_MHZ.to_sckdv(), 160);
+        assert_eq!(SpiHz::ONE_MHZ.to_sckdv(), ONE_MHZ_DIVIDER);
         // Exactly the edges resolve to the min/max even divider.
         assert_eq!(SpiHz::try_from_hz(SPI_CLOCK_HZ / 2).unwrap().to_sckdv(), 2);
+        let requested = SPI_CLOCK_HZ * 3 / 16;
+        let frequency = SpiHz::try_from_hz(requested).unwrap();
+        let divider = frequency.to_sckdv();
+        assert_eq!(divider, 6);
+        assert_eq!(frequency.hz(), requested);
+        assert_eq!(u32::from(frequency.divider()), divider);
+        assert_eq!(frequency.actual_hz(), SPI_CLOCK_HZ / divider);
+        assert!(u64::from(SPI_CLOCK_HZ) <= u64::from(requested) * u64::from(divider));
     }
 
     #[test]
@@ -724,6 +734,15 @@ mod proptests {
     use proptest::prelude::*;
 
     proptest! {
+        #[test]
+        fn accepted_frequency_never_overclocks(requested in any::<u32>()) {
+            if let Some(hz) = super::SpiHz::try_from_hz(requested) {
+                let divider = hz.to_sckdv();
+                prop_assert!(u64::from(crate::soc::chip::SPI_CLOCK_HZ)
+                    <= u64::from(requested) * u64::from(divider));
+            }
+        }
+
         /// Fuzz: sckdv never panics and is always a valid even divisor in [2, 0xFFFE].
         #[test]
         fn sckdv_in_valid_range(freq in any::<u32>()) {
