@@ -182,7 +182,7 @@ impl<'d, T: Instance, W: Word + Element> SpiTransfer<'d, T, W> {
         delay: &mut D,
         interval_us: core::num::NonZeroU32,
     ) -> Result<Completion, Error> {
-        self.pair.wait_async(delay, interval_us).await
+        super::timed_wait::wait(&mut self.pair, delay, interval_us).await
     }
     /// Poll both DMA channels, latched SPI errors and wire-idle within one budget.
     /// Completion observes progress, not physical drain/coherency or CS framing.
@@ -258,14 +258,6 @@ enum PairProgress {
     Pending,
     WaitingForIdle,
     Complete(Completion),
-}
-#[cfg(feature = "async")]
-struct AsyncStopGuard<'a, R: Registers, P: SpiRegisters>(&'a mut Pair<R, P>);
-#[cfg(feature = "async")]
-impl<R: Registers, P: SpiRegisters> Drop for AsyncStopGuard<'_, R, P> {
-    fn drop(&mut self) {
-        self.0.stop();
-    }
 }
 impl<R: Registers, P: SpiRegisters> Pair<R, P> {
     fn start(&mut self) -> Result<(), Error> {
@@ -360,22 +352,20 @@ impl<R: Registers, P: SpiRegisters> Pair<R, P> {
         self.stop();
         result
     }
-    #[cfg(feature = "async")]
-    async fn wait_async<D: embedded_hal_async::delay::DelayNs>(
-        &mut self,
-        delay: &mut D,
-        interval_us: core::num::NonZeroU32,
-    ) -> Result<Completion, Error> {
-        if self.state != State::Running {
-            return Err(Error::NotReady);
-        }
-        let guard = AsyncStopGuard(self);
-        loop {
-            match guard.0.poll()? {
-                PairProgress::Complete(done) => return Ok(done),
-                PairProgress::Pending | PairProgress::WaitingForIdle => delay.delay_us(interval_us.get()).await,
-            }
-        }
+}
+#[cfg(feature = "async")]
+impl<R: Registers, P: SpiRegisters> super::timed_wait::TimedTransfer for Pair<R, P> {
+    fn running(&self) -> bool {
+        self.state == State::Running
+    }
+    fn poll_step(&mut self) -> Result<Option<Completion>, Error> {
+        self.poll().map(|state| match state {
+            PairProgress::Complete(done) => Some(done),
+            PairProgress::Pending | PairProgress::WaitingForIdle => None,
+        })
+    }
+    fn stop(&mut self) {
+        Pair::stop(self);
     }
 }
 impl<R: Registers, P: SpiRegisters> Drop for Pair<R, P> {

@@ -28,6 +28,9 @@ pub mod uart;
 #[path = "dma_ws53/asynch.rs"]
 mod asynch;
 #[cfg(feature = "async")]
+#[path = "dma_ws53/timed_wait.rs"]
+mod timed_wait;
+#[cfg(feature = "async")]
 pub use asynch::{AsyncTransfer, on_async_interrupt};
 
 #[derive(Clone, Copy)]
