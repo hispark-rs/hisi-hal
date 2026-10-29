@@ -286,6 +286,30 @@ fn completion_requires_both_channels_valid_progress_no_residual_and_idle_wire() 
     }
 }
 #[test]
+fn nonblocking_observation_preserves_running_resources_until_terminal_result() {
+    let (mut p, events) = pair();
+    assert!(matches!(p.poll(), Err(Error::NotReady)));
+    p.start().unwrap();
+    p.rx.io.ready = 3;
+    assert!(matches!(p.poll(), Ok(PairProgress::Pending)));
+    assert_eq!(events.borrow().len(), 6);
+    p.io.snapshot.idle = false;
+    assert!(matches!(p.poll(), Ok(PairProgress::Pending)));
+    assert!(matches!(p.poll(), Ok(PairProgress::WaitingForIdle)));
+    assert_eq!(events.borrow().len(), 6);
+    p.io.snapshot.idle = true;
+    assert!(matches!(p.poll(), Ok(PairProgress::Complete(done)) if done.elements() == 17));
+    assert_eq!(&events.borrow()[6..], &["requests-off", "tx-stop", "rx-stop"]);
+    assert!(matches!(p.poll(), Err(Error::NotReady)));
+
+    let (mut p, events) = pair();
+    p.start().unwrap();
+    p.rx.io.error = true;
+    assert!(matches!(p.poll(), Err(Error::Bus)));
+    assert_eq!(&events.borrow()[6..], &["requests-off", "tx-stop", "rx-stop"]);
+    assert!(matches!(p.poll(), Err(Error::NotReady)));
+}
+#[test]
 fn drop_cancels_pair_but_forget_retains_resources_and_running_requests() {
     let (p, e) = pair();
     drop(p);

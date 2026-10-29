@@ -157,6 +157,17 @@ impl<'d, T: Instance, W: Word + Element> SpiTransfer<'d, T, W> {
     pub fn start(&mut self) -> Result<(), Error> {
         self.pair.start()
     }
+    /// Observe one bounded step without delaying or installing an interrupt.
+    /// `Ok(None)` retains the running transfer; callers must arrange a later
+    /// poll or explicitly stop it. Completion and errors close requests and
+    /// retain all resources, just like `wait`. This does not prove bus drain,
+    /// buffer coherency, CS framing, or arrange an async wakeup.
+    pub fn poll(&mut self) -> Result<Option<Completion>, Error> {
+        self.pair.poll().map(|status| match status {
+            PairProgress::Complete(done) => Some(done),
+            PairProgress::Pending | PairProgress::WaitingForIdle => None,
+        })
+    }
     /// Poll both DMA channels, latched SPI errors and wire-idle within one budget.
     /// Completion observes progress, not physical drain/coherency or CS framing.
     pub fn wait(&mut self, polls: NonZeroU16, delay: &mut impl DelayNs) -> Result<Completion, Error> {
@@ -227,6 +238,11 @@ struct Pair<R: Registers, P: SpiRegisters> {
     state: State,
     requests_owned: bool,
 }
+enum PairProgress {
+    Pending,
+    WaitingForIdle,
+    Complete(Completion),
+}
 impl<R: Registers, P: SpiRegisters> Pair<R, P> {
     fn start(&mut self) -> Result<(), Error> {
         if self.state != State::Ready {
@@ -269,42 +285,49 @@ impl<R: Registers, P: SpiRegisters> Pair<R, P> {
         self.rx.stop();
         self.state = State::Retained;
     }
+    fn poll(&mut self) -> Result<PairProgress, Error> {
+        if self.state != State::Running {
+            return Err(Error::NotReady);
+        }
+        let result = (|| {
+            let tx = self.tx.poll();
+            let rx = self.rx.poll();
+            match (tx, rx) {
+                (Err(Error::Bus), _) | (_, Err(Error::Bus)) => return Err(Error::Bus),
+                (Err(e), _) | (_, Err(e)) => return Err(e),
+                _ => {}
+            }
+            let s = self.io.snapshot();
+            if let Some(e) = s.error {
+                return Err(e);
+            }
+            if !s.configured || !self.io.valid(true) {
+                return Err(Error::SpiConfiguration);
+            }
+            if let (Ok(Some(done)), Ok(Some(_))) = (tx, rx) {
+                if s.rx_count != 0 {
+                    return Err(Error::SpiResidualReceive);
+                }
+                return Ok(if s.idle { PairProgress::Complete(done) } else { PairProgress::WaitingForIdle });
+            }
+            Ok(PairProgress::Pending)
+        })();
+        if !matches!(result, Ok(PairProgress::Pending | PairProgress::WaitingForIdle)) {
+            self.stop();
+        }
+        result
+    }
     fn wait(&mut self, polls: NonZeroU16, delay: &mut impl DelayNs) -> Result<Completion, Error> {
         if self.state != State::Running {
             return Err(Error::NotReady);
         }
         let mut result = Err(Error::Timeout);
         for n in 0..polls.get() {
-            let tx = self.tx.poll();
-            let rx = self.rx.poll();
-            let fault = match (tx, rx) {
-                (Err(Error::Bus), _) | (_, Err(Error::Bus)) => Some(Error::Bus),
-                (Err(e), _) | (_, Err(e)) => Some(e),
-                _ => None,
-            };
-            if let Some(e) = fault {
-                result = Err(e);
-                break;
-            }
-            let s = self.io.snapshot();
-            if let Some(e) = s.error {
-                result = Err(e);
-                break;
-            }
-            if !s.configured || !self.io.valid(true) {
-                result = Err(Error::SpiConfiguration);
-                break;
-            }
-            if let (Ok(Some(done)), Ok(Some(_))) = (tx, rx) {
-                if s.rx_count != 0 {
-                    result = Err(Error::SpiResidualReceive);
-                    break;
-                }
-                if s.idle {
-                    result = Ok(done);
-                    break;
-                }
-                result = Err(Error::TransmitTimeout);
+            match self.poll() {
+                Ok(PairProgress::Pending) => {}
+                Ok(PairProgress::WaitingForIdle) => result = Err(Error::TransmitTimeout),
+                Ok(PairProgress::Complete(done)) => return Ok(done),
+                Err(error) => return Err(error),
             }
             if n + 1 < polls.get() {
                 delay.delay_us(1);
