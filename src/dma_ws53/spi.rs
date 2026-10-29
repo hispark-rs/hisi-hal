@@ -168,6 +168,22 @@ impl<'d, T: Instance, W: Word + Element> SpiTransfer<'d, T, W> {
             PairProgress::Pending | PairProgress::WaitingForIdle => None,
         })
     }
+    /// Wait cooperatively for an already-started transfer, using a separate
+    /// async timer between observations. No SPI/DMA IRQ is installed. The timer
+    /// must continue running and arrange a wake; this method has no deadline.
+    ///
+    /// Cancelling after the first poll disables requests and stops both DMA
+    /// channels while retaining every resource. Dropping an unpolled future
+    /// has no effect on the already-running transfer. Completion is an observed
+    /// wire-idle state, not a physical bus-drain or cache-coherency proof.
+    #[cfg(feature = "async")]
+    pub async fn wait_async<D: embedded_hal_async::delay::DelayNs>(
+        &mut self,
+        delay: &mut D,
+        interval_us: core::num::NonZeroU32,
+    ) -> Result<Completion, Error> {
+        self.pair.wait_async(delay, interval_us).await
+    }
     /// Poll both DMA channels, latched SPI errors and wire-idle within one budget.
     /// Completion observes progress, not physical drain/coherency or CS framing.
     pub fn wait(&mut self, polls: NonZeroU16, delay: &mut impl DelayNs) -> Result<Completion, Error> {
@@ -242,6 +258,14 @@ enum PairProgress {
     Pending,
     WaitingForIdle,
     Complete(Completion),
+}
+#[cfg(feature = "async")]
+struct AsyncStopGuard<'a, R: Registers, P: SpiRegisters>(&'a mut Pair<R, P>);
+#[cfg(feature = "async")]
+impl<R: Registers, P: SpiRegisters> Drop for AsyncStopGuard<'_, R, P> {
+    fn drop(&mut self) {
+        self.0.stop();
+    }
 }
 impl<R: Registers, P: SpiRegisters> Pair<R, P> {
     fn start(&mut self) -> Result<(), Error> {
@@ -335,6 +359,23 @@ impl<R: Registers, P: SpiRegisters> Pair<R, P> {
         }
         self.stop();
         result
+    }
+    #[cfg(feature = "async")]
+    async fn wait_async<D: embedded_hal_async::delay::DelayNs>(
+        &mut self,
+        delay: &mut D,
+        interval_us: core::num::NonZeroU32,
+    ) -> Result<Completion, Error> {
+        if self.state != State::Running {
+            return Err(Error::NotReady);
+        }
+        let guard = AsyncStopGuard(self);
+        loop {
+            match guard.0.poll()? {
+                PairProgress::Complete(done) => return Ok(done),
+                PairProgress::Pending | PairProgress::WaitingForIdle => delay.delay_us(interval_us.get()).await,
+            }
+        }
     }
 }
 impl<R: Registers, P: SpiRegisters> Drop for Pair<R, P> {

@@ -309,6 +309,54 @@ fn nonblocking_observation_preserves_running_resources_until_terminal_result() {
     assert_eq!(&events.borrow()[6..], &["requests-off", "tx-stop", "rx-stop"]);
     assert!(matches!(p.poll(), Err(Error::NotReady)));
 }
+#[cfg(feature = "async")]
+#[test]
+fn timer_driven_wait_completion_fault_and_cancellation_keep_ownership() {
+    use core::{
+        future::Future,
+        num::NonZeroU32,
+        task::{Context, Poll, Waker},
+    };
+    struct Timer(bool);
+    impl embedded_hal_async::delay::DelayNs for Timer {
+        async fn delay_ns(&mut self, _: u32) {
+            if self.0 {
+                core::future::pending::<()>().await;
+            }
+        }
+    }
+    let interval = NonZeroU32::new(1).unwrap();
+    let mut cx = Context::from_waker(Waker::noop());
+    let (mut p, events) = pair();
+    p.start().unwrap();
+    let mut timer = Timer(true);
+    let mut pending = Box::pin(p.wait_async(&mut timer, interval));
+    assert!(pending.as_mut().poll(&mut cx).is_pending());
+    assert_eq!(events.borrow().len(), 6);
+    drop(pending);
+    assert_eq!(&events.borrow()[6..], &["requests-off", "tx-stop", "rx-stop"]);
+    assert!(matches!(p.poll(), Err(Error::NotReady)));
+
+    let (mut p, events) = pair();
+    p.start().unwrap();
+    let mut timer = Timer(false);
+    let future = p.wait_async(&mut timer, interval);
+    drop(future);
+    assert_eq!(events.borrow().len(), 6); // unpolled cancellation is inert
+    let mut future = Box::pin(p.wait_async(&mut timer, interval));
+    assert_eq!(future.as_mut().poll(&mut cx), Poll::Ready(Ok(Completion { elements: 17 })));
+    drop(future);
+    assert_eq!(&events.borrow()[6..], &["requests-off", "tx-stop", "rx-stop"]);
+
+    let (mut p, events) = pair();
+    p.start().unwrap();
+    p.rx.io.error = true;
+    let mut timer = Timer(false);
+    let mut future = Box::pin(p.wait_async(&mut timer, interval));
+    assert_eq!(future.as_mut().poll(&mut cx), Poll::Ready(Err(Error::Bus)));
+    drop(future);
+    assert_eq!(&events.borrow()[6..], &["requests-off", "tx-stop", "rx-stop"]);
+}
 #[test]
 fn drop_cancels_pair_but_forget_retains_resources_and_running_requests() {
     let (p, e) = pair();
