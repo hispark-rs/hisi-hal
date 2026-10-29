@@ -4,8 +4,8 @@
 //! Per-channel event masks support IRQ58 notification; buffers remain static, exclusively
 //! owned and explicitly coherent; timeout/cancel/Drop never reclaim them. An
 //! independent unsafe bus-drain proof is required even after observed completion.
-//! Memory-copy async waiting is optional; peripheral async, SDMA, LLI and cache
-//! maintenance remain pending.
+//! Memory-copy and UART async waiting are optional; other peripheral async,
+//! SDMA, LLI and cache maintenance remain pending.
 use crate::{interrupt, peripherals::Mdma, soc::pac};
 use core::{
     marker::PhantomData,
