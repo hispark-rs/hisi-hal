@@ -248,28 +248,18 @@ impl<'d, T> Spi<'d, T> {
     /// through the TX/RX FIFOs (zero-padded TX / discarded RX for the shorter slice).
     pub fn transfer(&mut self, write: &[u8], read: &mut [u8]) -> Result<(), SpiError> {
         let r = spi_regs(self.idx);
-        let len = write.len().max(read.len());
-        for i in 0..len {
-            let tx = if i < write.len() { write[i] as u32 } else { 0 };
+        crate::spi_transfer::transfer(read, write, |tx| {
             wait_until(|| r.spi_wsr().read().txfnf().bit_is_set())?;
-            unsafe { spi_data_reg(r).write(|w| w.bits(tx)) };
+            unsafe { spi_data_reg(r).write(|w| w.bits(u32::from(tx))) };
             wait_until(|| r.spi_wsr().read().rxfne().bit_is_set())?;
-            let rx = spi_data_reg(r).read().bits();
-            if i < read.len() {
-                read[i] = rx as u8;
-            }
-        }
-        Ok(())
+            Ok(spi_data_reg(r).read().bits() as u8)
+        })
     }
 
-    /// Write-only transfer: push `data` into the TX FIFO, discarding any RX bytes.
+    /// Write-only transfer in the configured full-duplex mode.
+    /// Wait for and discard each received frame to avoid leaving stale RX data.
     pub fn write(&mut self, data: &[u8]) -> Result<(), SpiError> {
-        let r = spi_regs(self.idx);
-        for &byte in data {
-            wait_until(|| r.spi_wsr().read().txfnf().bit_is_set())?;
-            unsafe { spi_data_reg(r).write(|w| w.bits(byte as u32)) };
-        }
-        Ok(())
+        self.transfer(data, &mut [])
     }
 
     /// Borrow the underlying PAC register block for this SPI instance.

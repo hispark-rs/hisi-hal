@@ -363,6 +363,7 @@ pub mod spi;
 #[cfg(feature = "chip-ws53")]
 #[path = "spi_ws53.rs"]
 pub mod spi;
+mod spi_transfer;
 /// System control block access and the `System` token.
 #[cfg(feature = "chip-ws63")]
 pub mod system;

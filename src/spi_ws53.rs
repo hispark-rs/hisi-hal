@@ -486,15 +486,7 @@ impl<R: Registers, D: DelayNs, W: Word> Engine<R, D, W> {
         if n == 0 {
             return self.ready();
         }
-        self.execute(true, |s| {
-            for i in 0..n {
-                let received = s.exchange(write.get(i).copied().unwrap_or_default())?;
-                if let Some(slot) = read.get_mut(i) {
-                    *slot = received;
-                }
-            }
-            Ok(())
-        })
+        self.execute(true, |s| crate::spi_transfer::transfer(read, write, |word| s.exchange(word)))
     }
     fn transfer_in_place(&mut self, words: &mut [W]) -> Result<(), Error> {
         if words.is_empty() {
