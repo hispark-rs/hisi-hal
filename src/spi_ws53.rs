@@ -24,15 +24,10 @@ impl SpiHz {
     /// does not exceed the request. Reject requests outside the source range;
     /// no truncation or minimum-divider clamp. This is not a measured rate.
     pub const fn try_from_hz(hz: u32) -> Option<Self> {
-        if hz == 0 || hz > 16_000_000 {
-            return None;
+        match crate::spi_clock::checked_divider(32_000_000, hz) {
+            Some(divider) => Some(Self { requested: hz, divider }),
+            None => None,
         }
-        let ceil = 32_000_000u64.div_ceil(hz as u64);
-        let even = (ceil + 1) & !1;
-        if even > 65534 {
-            return None;
-        }
-        Some(Self { requested: hz, divider: even as u16 })
     }
     /// Requested maximum rate in Hz.
     pub const fn hz(self) -> u32 {
