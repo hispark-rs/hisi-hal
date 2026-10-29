@@ -20,11 +20,9 @@ pub enum SpiMode {
     Mode3,
 }
 
-/// A validated SPI bus clock. The DesignWare SSI divides `SPI_CLOCK_HZ` (160 MHz)
-/// by an even SCKDV in `[2, 0xFFFE]`, so the achievable SCK is
-/// `[SPI_CLOCK_HZ/0xFFFE ≈ 2.4 kHz, SPI_CLOCK_HZ/2 = 80 MHz]`. `try_from_hz` rejects
-/// anything outside that band instead of silently clamping the divider (the old
-/// `frequency: u32` path clamped to 2× / ½× the requested SCK without telling you).
+/// A validated SPI bus clock for the selected chip's source-clock profile.
+/// The controller divides that source by an even SCKDV in `[2, 0xFFFE]`.
+/// Clock setup and actual silicon frequency remain platform responsibilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct SpiHz(u32);
@@ -44,9 +42,21 @@ impl SpiHz {
         }
     }
 
-    /// The requested SCK frequency in Hz.
+    /// Requested maximum SCK frequency in Hz.
     pub const fn hz(self) -> u32 {
         self.0
+    }
+
+    /// Exact SCKDV register divisor; always even and within `2..=65534`.
+    pub const fn divider(self) -> u16 {
+        self.to_sckdv() as u16
+    }
+
+    /// Source-profile rate rounded down to whole Hz; not a measurement.
+    /// The exact fraction is the selected chip's source clock divided by
+    /// [`divider`](Self::divider). Confirm the source clock on the platform.
+    pub const fn actual_hz(self) -> u32 {
+        crate::soc::chip::SPI_CLOCK_HZ / self.to_sckdv()
     }
 
     /// The even SCKDV divider for this frequency (always in `[2, 0xFFFE]`).
@@ -696,8 +706,12 @@ mod tests {
         // Exactly the edges resolve to the min/max even divider.
         assert_eq!(SpiHz::try_from_hz(SPI_CLOCK_HZ / 2).unwrap().to_sckdv(), 2);
         let requested = SPI_CLOCK_HZ * 3 / 16;
-        let divider = SpiHz::try_from_hz(requested).unwrap().to_sckdv();
+        let frequency = SpiHz::try_from_hz(requested).unwrap();
+        let divider = frequency.to_sckdv();
         assert_eq!(divider, 6);
+        assert_eq!(frequency.hz(), requested);
+        assert_eq!(u32::from(frequency.divider()), divider);
+        assert_eq!(frequency.actual_hz(), SPI_CLOCK_HZ / divider);
         assert!(u64::from(SPI_CLOCK_HZ) <= u64::from(requested) * u64::from(divider));
     }
 
