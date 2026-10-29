@@ -221,14 +221,11 @@ impl Drop for AsyncDelay<'_, '_> {
         drop(old);
     }
 }
-fn ticks_for(value: u32, units_per_second: u64) -> u64 {
-    (u64::from(value) * u64::from(TIMER_CLOCK_HZ)).div_ceil(units_per_second)
+fn ticks_for(value: u32, units_per_second: u32) -> u64 {
+    crate::timer_math::delay_ticks(value, TIMER_CLOCK_HZ, units_per_second)
 }
 fn next_chunk(remaining: &mut u64) -> Option<TimerTicks> {
-    // Split rather than truncate: the exact remainder is retained for later IRQs.
-    let count = (*remaining).min(u64::from(u32::MAX)) as u32;
-    *remaining -= u64::from(count);
-    TimerTicks::from_count(count)
+    crate::timer_math::next_delay_chunk(remaining).and_then(TimerTicks::from_count)
 }
 impl AsyncDelay<'_, '_> {
     /// Wait for one nonzero raw period at the established clock.
@@ -299,8 +296,8 @@ mod tests {
             for value in [0, 1, 31, 32, 33, 999, 1000, 134217, 134218, u32::MAX] {
                 let ticks = ticks_for(value, units);
                 let requested = u64::from(value) * u64::from(TIMER_CLOCK_HZ);
-                assert!(ticks * units >= requested);
-                assert!(ticks == 0 || (ticks - 1) * units < requested);
+                assert!(ticks * u64::from(units) >= requested);
+                assert!(ticks == 0 || (ticks - 1) * u64::from(units) < requested);
                 let mut remaining = ticks;
                 let mut total = 0;
                 while let Some(chunk) = next_chunk(&mut remaining) {
