@@ -658,35 +658,41 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// [`wait`]: Transfer::wait
     ///
     /// A borrowed stack allocation cannot be supplied:
-    /// ```compile_fail
-    /// # use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver};
-    /// fn borrowed<'a>(driver: DmaDriver<'static, Dma0>, channel: DmaChannel,
-    ///                 src: &'a [u32], dst: &'a mut [u32]) {
-    ///     let _guard = driver.start_mem_to_mem(channel, src, dst);
-    /// }
-    /// ```
+    #[cfg_attr(feature = "unstable", doc = r#"
+```compile_fail,E0521
+# use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver};
+fn borrowed<'a>(driver: DmaDriver<'static, Dma0>, channel: DmaChannel,
+                src: &'a [u32], dst: &'a mut [u32]) {
+    let _guard = driver.start_mem_to_mem(channel, src, dst);
+}
+```
+"#)]
     /// A reborrowed controller cannot escape through a forgotten guard either:
-    /// ```compile_fail,E0521
-    /// use hisi_hal::{dma::DmaDriver, peripherals::Dma};
-    /// fn forgotten(token: &mut Dma<'static>, src: &'static [u32], dst: &'static mut [u32]) {
-    ///     let driver = DmaDriver::new_dma(token.reborrow());
-    ///     let channels = driver.split_channels().unwrap();
-    ///     if let Ok(transfer) = driver.start_mem_to_mem(channels.ch0, src, dst) {
-    ///         core::mem::forget(transfer);
-    ///     }
-    ///     let mut reclaimed = DmaDriver::new_dma(token.reborrow());
-    ///     reclaimed.enable_controller();
-    /// }
-    /// ```
+    #[cfg_attr(feature = "unstable", doc = r#"
+```compile_fail,E0521
+use hisi_hal::{dma::DmaDriver, peripherals::Dma};
+fn forgotten(token: &mut Dma<'static>, src: &'static [u32], dst: &'static mut [u32]) {
+    let driver = DmaDriver::new_dma(token.reborrow());
+    let channels = driver.split_channels().unwrap();
+    if let Ok(transfer) = driver.start_mem_to_mem(channels.ch0, src, dst) {
+        core::mem::forget(transfer);
+    }
+    let mut reclaimed = DmaDriver::new_dma(token.reborrow());
+    reclaimed.enable_controller();
+}
+```
+"#)]
     /// Moving the original controller token remains supported:
-    /// ```no_run
-    /// use hisi_hal::{dma::DmaDriver, peripherals::Dma};
-    /// fn owned(token: Dma<'static>, src: &'static [u32], dst: &'static mut [u32]) {
-    ///     let driver = DmaDriver::new_dma(token);
-    ///     let channels = driver.split_channels().unwrap();
-    ///     let _transfer = driver.start_mem_to_mem(channels.ch0, src, dst);
-    /// }
-    /// ```
+    #[cfg_attr(feature = "unstable", doc = r#"
+```no_run
+use hisi_hal::{dma::DmaDriver, peripherals::Dma};
+fn owned(token: Dma<'static>, src: &'static [u32], dst: &'static mut [u32]) {
+    let driver = DmaDriver::new_dma(token);
+    let channels = driver.split_channels().unwrap();
+    let _transfer = driver.start_mem_to_mem(channels.ch0, src, dst);
+}
+```
+"#)]
     #[instability::unstable]
     pub fn start_mem_to_mem<SRC, DST>(
         mut self,
@@ -856,10 +862,12 @@ impl<'d, SRC, DST> DmaStartError<'d, SRC, DST> {
 /// Resources retained when a started DMA transfer times out. Dropping the error
 /// intentionally retains all resources, including the channel reservation.
 ///
-/// ```compile_fail
-/// use hisi_hal::dma::DmaWaitError;
-/// fn recover(e: DmaWaitError<'static, (), ()>) { let _ = e.into_parts(); }
-/// ```
+#[cfg_attr(feature = "unstable", doc = r#"
+```compile_fail,E0133
+use hisi_hal::dma::DmaWaitError;
+fn recover(e: DmaWaitError<'static, (), ()>) { let _ = e.into_parts(); }
+```
+"#)]
 #[instability::unstable]
 pub struct DmaWaitError<'d, SRC, DST> {
     error: DmaError,
@@ -1179,12 +1187,14 @@ impl DmaDriver<'_, Dma0> {
     /// exclusively owned and DMA-accessible until outstanding bus accesses drain.
     /// Cache maintenance and cross-core coordination are also the caller's duty.
     ///
-    /// ```compile_fail
-    /// # use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver};
-    /// fn restart(driver: &mut DmaDriver<'_, Dma0>, channel: &DmaChannel) {
-    ///     driver.enable_channel(channel);
-    /// }
-    /// ```
+    #[cfg_attr(feature = "unstable", doc = r#"
+```compile_fail,E0133
+# use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver};
+fn restart(driver: &mut DmaDriver<'_, Dma0>, channel: &DmaChannel) {
+    driver.enable_channel(channel);
+}
+```
+"#)]
     pub unsafe fn enable_channel(&mut self, channel: &DmaChannel) {
         self.enable_channel_raw(channel.logical);
     }
@@ -1217,12 +1227,14 @@ impl DmaDriver<'_, Dma0> {
     /// [`Self::enable_channel`] must hold for the resumed operation. In
     /// particular, halting or disabling a channel does not establish bus drain.
     ///
-    /// ```compile_fail
-    /// # use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver};
-    /// fn resume(driver: &mut DmaDriver<'_, Dma0>, channel: &DmaChannel) {
-    ///     driver.resume_channel(channel);
-    /// }
-    /// ```
+    #[cfg_attr(feature = "unstable", doc = r#"
+```compile_fail,E0133
+# use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver};
+fn resume(driver: &mut DmaDriver<'_, Dma0>, channel: &DmaChannel) {
+    driver.resume_channel(channel);
+}
+```
+"#)]
     pub unsafe fn resume_channel(&mut self, channel: &DmaChannel) {
         self.resume_channel_raw(channel.logical);
     }
@@ -1282,23 +1294,27 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// A bounded `active` poll and the channel-disable bit do not supply that
     /// proof. Ensure DMA and CPU cache visibility throughout the transfer.
     ///
-    /// ```compile_fail
-    /// # use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver, DmaFrame, DmaPeripheral, PeriDmaCtl};
-    /// fn unchecked(driver: DmaDriver<'static, Dma0>, channel: DmaChannel,
-    ///              data: &'static [u8], ctl: PeriDmaCtl) {
-    ///     let _ = driver.start_mem_to_peripheral(channel, data, 0,
-    ///         DmaPeripheral::Spi0Tx, DmaFrame::Byte, ctl);
-    /// }
-    /// ```
+    #[cfg_attr(feature = "unstable", doc = r#"
+```compile_fail,E0133
+# use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver, DmaFrame, DmaPeripheral, PeriDmaCtl};
+fn unchecked(driver: DmaDriver<'static, Dma0>, channel: DmaChannel,
+             data: &'static [u8], ctl: PeriDmaCtl) {
+    let _ = driver.start_mem_to_peripheral(channel, data, 0,
+        DmaPeripheral::Spi0Tx, DmaFrame::Byte, ctl);
+}
+```
+"#)]
     /// Even an unsafe peripheral start cannot use a short controller borrow:
-    /// ```compile_fail,E0521
-    /// use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver, DmaFrame, DmaPeripheral, PeriDmaCtl};
-    /// unsafe fn borrowed<'a>(driver: DmaDriver<'a, Dma0>, ch: DmaChannel,
-    ///                        data: &'static [u8], address: usize, ctl: PeriDmaCtl) {
-    ///     let _ = unsafe { driver.start_mem_to_peripheral(ch, data, address,
-    ///         DmaPeripheral::Spi0Tx, DmaFrame::Byte, ctl) };
-    /// }
-    /// ```
+    #[cfg_attr(feature = "unstable", doc = r#"
+```compile_fail,E0521
+use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver, DmaFrame, DmaPeripheral, PeriDmaCtl};
+unsafe fn borrowed<'a>(driver: DmaDriver<'a, Dma0>, ch: DmaChannel,
+                       data: &'static [u8], address: usize, ctl: PeriDmaCtl) {
+    let _ = unsafe { driver.start_mem_to_peripheral(ch, data, address,
+        DmaPeripheral::Spi0Tx, DmaFrame::Byte, ctl) };
+}
+```
+"#)]
     #[instability::unstable]
     pub unsafe fn start_mem_to_peripheral<SRC>(
         mut self,
@@ -1366,14 +1382,16 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// buffer lifetime, independent drain and cache visibility requirements
     /// also apply. Destination cache lines must be exclusively held until drain.
     ///
-    /// ```compile_fail,E0521
-    /// use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver, DmaFrame, DmaPeripheral, PeriDmaCtl};
-    /// unsafe fn borrowed<'a>(driver: DmaDriver<'a, Dma0>, ch: DmaChannel,
-    ///                        data: &'static mut [u8], address: usize, ctl: PeriDmaCtl) {
-    ///     let _ = unsafe { driver.start_peripheral_to_mem(ch, data, address,
-    ///         DmaPeripheral::Spi0Rx, DmaFrame::Byte, ctl) };
-    /// }
-    /// ```
+    #[cfg_attr(feature = "unstable", doc = r#"
+```compile_fail,E0521
+use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver, DmaFrame, DmaPeripheral, PeriDmaCtl};
+unsafe fn borrowed<'a>(driver: DmaDriver<'a, Dma0>, ch: DmaChannel,
+                       data: &'static mut [u8], address: usize, ctl: PeriDmaCtl) {
+    let _ = unsafe { driver.start_peripheral_to_mem(ch, data, address,
+        DmaPeripheral::Spi0Rx, DmaFrame::Byte, ctl) };
+}
+```
+"#)]
     #[instability::unstable]
     pub unsafe fn start_peripheral_to_mem<DST>(
         mut self,

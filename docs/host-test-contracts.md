@@ -27,3 +27,13 @@ three failures (burst decoding, lock decoding, reserved bits). The mutations wer
 never applied to published production code. Detailed inputs, versions and logs
 belong to the parent integration evidence. This experiment qualifies these
 properties' sensitivity, not every test in the repository or silicon behavior.
+
+
+Stable WS63 (`chip-ws63`, with/without `rt,async`) is checked separately from
+experimental WS63/BS21/WS53. Running only `unstable` configurations can miss
+public-example access failures. DMA ownership and unsafe-call examples are
+included only when their experimental API is available; negative examples
+require the intended diagnostic (escaping borrow E0521, unsafe start/resume/resource recovery E0133). They must not pass merely because the module is
+private (E0603). The positive owned-token example still compiles with `unstable`.
+No example is ignored to make stable CI pass, and this does not expose DMA in
+the stable API or change DMA/cache/lifetime behavior.

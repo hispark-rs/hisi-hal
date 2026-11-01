@@ -443,6 +443,9 @@ impl embedded_hal::delay::DelayNs for OneShotTimer<'_> {
 }
 
 impl OneShotTimer<'_> {
+    // The wrapper is crate-private without unstable; its trait remains compiled
+    // but cannot be reached by consumers in that configuration.
+    #[cfg_attr(not(feature = "unstable"), allow(dead_code))]
     fn delay_periods(&mut self, value: u32, units_per_second: u32) {
         let mut remaining = crate::timer_math::delay_ticks(value, TIMER_CLOCK_HZ, units_per_second);
         while let Some(chunk) = crate::timer_math::next_delay_chunk(&mut remaining) {
