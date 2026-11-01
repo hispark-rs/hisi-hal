@@ -1,6 +1,6 @@
 //! Legacy WS63 UART register adapter; RX lifecycle is shared.
 use super::async_receive::{ReceiveWait, RxIo, WakerSlot};
-use super::{Uart, UartPort, uart_regs};
+use super::{Uart, UartInstance, UartPort, uart_regs};
 use crate::peripherals::{Uart0, Uart1, Uart2};
 use core::{cell::Cell, convert::Infallible, future::poll_fn, task::Waker};
 use critical_section::Mutex;
@@ -29,16 +29,15 @@ pub fn on_interrupt(port: UartPort) {
 }
 
 struct PacRx<'a, 'd, T> {
-    _uart: &'a Uart<'d, T>,
+    uart: &'a Uart<'d, T>,
     port: UartPort,
 }
-impl<T> RxIo for PacRx<'_, '_, T> {
+impl<T: UartInstance> RxIo for PacRx<'_, '_, T> {
     type Error = Infallible;
     fn read(&mut self) -> nb::Result<u8, Self::Error> {
-        let r = uart_regs(self.port);
-        // Match blocking RX: the empty status bit does not track a
-        // single-byte pop on silicon. Do not read DATA on an empty FIFO.
-        if r.rx_fifo_cnt().read().bits() == 0 { Err(nb::Error::WouldBlock) } else { Ok(r.data().read().bits() as u8) }
+        // Use the same qualified status/data path as blocking reception.
+        // The receive-count alias is not interchangeable across these chips.
+        self.uart.read_byte().ok_or(nb::Error::WouldBlock)
     }
     fn arm(&mut self) {
         uart_regs(self.port).intr_en().modify(|_, w| w.rece_data_intr_en().set_bit());
@@ -48,8 +47,8 @@ impl<T> RxIo for PacRx<'_, '_, T> {
     }
 }
 
-async fn read_one(uart: &Uart<'_, impl Sized>, port: UartPort) -> u8 {
-    let mut wait = ReceiveWait::new(PacRx { _uart: uart, port }, PortSlot(port));
+async fn read_one<T: UartInstance>(uart: &Uart<'_, T>, port: UartPort) -> u8 {
+    let mut wait = ReceiveWait::new(PacRx { uart, port }, PortSlot(port));
     match poll_fn(|cx| wait.poll(cx)).await {
         Ok(byte) => byte,
         Err(never) => match never {},

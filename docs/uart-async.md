@@ -25,8 +25,11 @@ Neither this algorithm nor a software waker prevents physical FIFO overrun.
   acknowledgement. Its ISR still does not consume DATA or read-clear errors.
 - WS63 keeps its existing trait and trap-hook signatures, externally enabled
   local IRQ and infallible receive API. The ISR now masks RX and wakes without
-  removing a byte; the waiter reads using the FIFO count, as the blocking
-  driver does. The former per-port one-byte software latch could be overwritten
+  removing a byte; the waiter delegates to the blocking driver's existing
+  `read_byte` status/data path (`LINE_STATUS.data_available`). The receive-count
+  alias must not be substituted across chips. The initial extraction incorrectly
+  used that count and is corrected here; its host-only FIFO tests could not
+  establish which hardware register to read. The former per-port one-byte software latch could be overwritten
   by another interrupt before consumption, and a cancelled waiter left RX
   enabled. Both paths are removed. This is a behavior fix, not inherited HIL
   qualification. Only RX-data interrupts are owned; route the UART on its
