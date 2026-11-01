@@ -1,13 +1,8 @@
 //! Single-hart RX/TX adapters, each exclusively borrowing the whole UART.
-use super::async_receive::{ReceiveWait, RxIo, WakerSlot};
+use super::async_wait::{Wait, WaitIo, WakerSlot};
 use super::{ReceiveError, ReceiveInterrupt, Uart, UartInstance, uart_regs};
 use crate::interrupt;
-use core::{
-    cell::Cell,
-    future::poll_fn,
-    marker::PhantomData,
-    task::{Context, Poll, Waker},
-};
+use core::{cell::Cell, future::poll_fn, marker::PhantomData, task::Waker};
 use critical_section::Mutex;
 
 static WAKERS: Mutex<[Cell<Option<Waker>>; 3]> = Mutex::new([const { Cell::new(None) }; 3]);
@@ -84,9 +79,10 @@ impl<'d, T: UartInstance> Uart<'d, T> {
 }
 
 struct PacRx<'a, 'd, T: UartInstance>(&'a mut Uart<'d, T>);
-impl<T: UartInstance> RxIo for PacRx<'_, '_, T> {
+impl<T: UartInstance> WaitIo for PacRx<'_, '_, T> {
+    type Output = u8;
     type Error = ReceiveError;
-    fn read(&mut self) -> nb::Result<u8, Self::Error> {
+    fn try_complete(&mut self) -> nb::Result<u8, Self::Error> {
         self.0.read_byte()
     }
     fn arm(&mut self) {
@@ -117,7 +113,7 @@ impl<T: UartInstance> embedded_io_async::Read for AsyncReceiver<'_, '_, T> {
         if buf.is_empty() {
             return Ok(0);
         }
-        let mut wait = ReceiveWait::new(PacRx(&mut *self.uart), PortSlot(T::PORT));
+        let mut wait = Wait::new(PacRx(&mut *self.uart), PortSlot(T::PORT));
         let byte = poll_fn(|cx| wait.poll(cx)).await?;
         buf[0] = byte;
         Ok(1)
@@ -219,18 +215,19 @@ enum TxOperation {
     Write(u8),
     Flush,
 }
-trait TxIo {
-    fn ready(&mut self, operation: TxOperation) -> bool;
-    fn arm(&mut self);
-    fn disarm(&mut self);
+struct PacTx<'a, 'd, T: UartInstance> {
+    uart: &'a mut Uart<'d, T>,
+    operation: TxOperation,
 }
-struct PacTx<'a, 'd, T: UartInstance>(&'a mut Uart<'d, T>);
-impl<T: UartInstance> TxIo for PacTx<'_, '_, T> {
-    fn ready(&mut self, operation: TxOperation) -> bool {
-        match operation {
-            TxOperation::Write(byte) => self.0.try_write_byte(byte).is_ok(),
-            TxOperation::Flush => self.0.tx_flushed(),
-        }
+impl<T: UartInstance> WaitIo for PacTx<'_, '_, T> {
+    type Output = ();
+    type Error = core::convert::Infallible;
+    fn try_complete(&mut self) -> nb::Result<(), Self::Error> {
+        let ready = match self.operation {
+            TxOperation::Write(byte) => self.uart.try_write_byte(byte).is_ok(),
+            TxOperation::Flush => self.uart.tx_flushed(),
+        };
+        if ready { Ok(()) } else { Err(nb::Error::WouldBlock) }
     }
     fn arm(&mut self) {
         uart_regs(T::PORT).intr_en().modify(|_, w| w.tran_em_intr_en().set_bit());
@@ -241,46 +238,10 @@ impl<T: UartInstance> TxIo for PacTx<'_, '_, T> {
         unsafe { interrupt::disable(T::PORT.interrupt()) };
     }
 }
-fn poll_tx(
-    io: &mut impl TxIo,
-    slot: &impl WakerSlot,
-    operation: TxOperation,
-    waker: Waker,
-) -> (Poll<()>, Option<Waker>, Option<Waker>) {
-    let old = slot.replace(Some(waker));
-    io.disarm();
-    let mut ready = io.ready(operation);
-    if !ready {
-        io.arm();
-        ready = io.ready(operation);
-    }
-    if ready {
-        io.disarm();
-        (Poll::Ready(()), old, slot.take())
-    } else {
-        (Poll::Pending, old, None)
-    }
-}
 fn cancel_tx<T: UartInstance>(uart: &mut Uart<'_, T>) {
-    PacTx(uart).disarm();
+    // Disarm has no operation-specific side effects; never reset TX here.
+    PacTx { uart, operation: TxOperation::Flush }.disarm();
     drop(PortSlot(T::PORT).take());
-}
-struct TxWait<'a, 'd, T: UartInstance> {
-    uart: &'a mut Uart<'d, T>,
-    operation: TxOperation,
-}
-impl<T: UartInstance> TxWait<'_, '_, T> {
-    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        let waker = cx.waker().clone();
-        let (result, old, done) = poll_tx(&mut PacTx(self.uart), &PortSlot(T::PORT), self.operation, waker);
-        drop((old, done));
-        result
-    }
-}
-impl<T: UartInstance> Drop for TxWait<'_, '_, T> {
-    fn drop(&mut self) {
-        cancel_tx(self.uart);
-    }
 }
 impl<T: UartInstance> Drop for AsyncTransmitter<'_, '_, T> {
     fn drop(&mut self) {
@@ -295,128 +256,14 @@ impl<T: UartInstance> embedded_io_async::Write for AsyncTransmitter<'_, '_, T> {
         let Some(&byte) = buf.first() else {
             return Ok(0);
         };
-        let mut wait = TxWait { uart: &mut *self.uart, operation: TxOperation::Write(byte) };
-        poll_fn(|cx| wait.poll(cx)).await;
+        let mut wait =
+            Wait::new(PacTx { uart: &mut *self.uart, operation: TxOperation::Write(byte) }, PortSlot(T::PORT));
+        poll_fn(|cx| wait.poll(cx)).await?;
         Ok(1)
     }
     async fn flush(&mut self) -> Result<(), Self::Error> {
-        let mut wait = TxWait { uart: &mut *self.uart, operation: TxOperation::Flush };
-        poll_fn(|cx| wait.poll(cx)).await;
+        let mut wait = Wait::new(PacTx { uart: &mut *self.uart, operation: TxOperation::Flush }, PortSlot(T::PORT));
+        poll_fn(|cx| wait.poll(cx)).await?;
         Ok(())
-    }
-}
-
-#[cfg(all(test, not(target_arch = "riscv32")))]
-mod tx_tests {
-    use super::*;
-    use std::{
-        collections::VecDeque,
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-        task::Wake,
-    };
-    struct Count(AtomicUsize);
-    impl Wake for Count {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-    struct Io {
-        ready: VecDeque<bool>,
-        writes: std::vec::Vec<u8>,
-        armed: bool,
-    }
-    impl TxIo for Io {
-        fn ready(&mut self, op: TxOperation) -> bool {
-            let ready = self.ready.pop_front().unwrap_or(false);
-            if ready && let TxOperation::Write(byte) = op {
-                self.writes.push(byte);
-            }
-            ready
-        }
-        fn arm(&mut self) {
-            self.armed = true;
-        }
-        fn disarm(&mut self) {
-            self.armed = false;
-        }
-    }
-    #[test]
-    fn room_before_check_or_during_arm_writes_exactly_one_byte() {
-        for ready in [std::vec![true], std::vec![false, true]] {
-            let mut io = Io { ready: ready.into(), writes: std::vec![], armed: false };
-            let slot = Cell::new(None);
-            let (result, old, done) = poll_tx(&mut io, &slot, TxOperation::Write(0xa5), Waker::noop().clone());
-            drop((old, done));
-            assert_eq!(result, Poll::Ready(()));
-            assert_eq!(io.writes, [0xa5]);
-            assert!(!io.armed);
-            assert!(slot.take().is_none());
-        }
-    }
-    #[test]
-    fn pending_repoll_has_no_unreported_write_and_replaces_waker() {
-        let mut io = Io { ready: VecDeque::new(), writes: std::vec![], armed: false };
-        let slot = Cell::new(None);
-        let first = Arc::new(Count(AtomicUsize::new(0)));
-        let last = Arc::new(Count(AtomicUsize::new(0)));
-        assert_eq!(poll_tx(&mut io, &slot, TxOperation::Write(1), Waker::from(first.clone())).0, Poll::Pending);
-        let (result, old, done) = poll_tx(&mut io, &slot, TxOperation::Write(1), Waker::from(last.clone()));
-        drop((old, done));
-        assert_eq!(result, Poll::Pending);
-        assert!(io.writes.is_empty());
-        assert_eq!(Arc::strong_count(&first), 1);
-        io.disarm();
-        slot.take().unwrap().wake();
-        assert_eq!(last.0.load(Ordering::SeqCst), 1);
-        io.ready.push_back(true);
-        assert_eq!(poll_tx(&mut io, &slot, TxOperation::Write(1), Waker::from(last.clone())).0, Poll::Ready(()));
-        assert_eq!(io.writes, [1]);
-        assert_eq!(Arc::strong_count(&last), 1);
-    }
-
-    #[test]
-    fn interrupt_during_disarm_schedules_repoll_without_writing() {
-        struct Race<'a> {
-            slot: &'a Cell<Option<Waker>>,
-            interrupt_once: bool,
-        }
-        impl TxIo for Race<'_> {
-            fn ready(&mut self, _: TxOperation) -> bool {
-                false
-            }
-            fn arm(&mut self) {}
-            fn disarm(&mut self) {
-                if core::mem::take(&mut self.interrupt_once) {
-                    self.slot.take().unwrap().wake();
-                }
-            }
-        }
-        let slot = Cell::new(None);
-        let count = Arc::new(Count(AtomicUsize::new(0)));
-        let mut io = Race { slot: &slot, interrupt_once: true };
-        assert!(poll_tx(&mut io, &slot, TxOperation::Write(0xa5), Waker::from(count.clone())).0.is_pending());
-        assert_eq!(count.0.load(Ordering::SeqCst), 1);
-        assert!(slot.take().is_none());
-        assert!(poll_tx(&mut io, &slot, TxOperation::Write(0xa5), Waker::from(count.clone())).0.is_pending());
-        slot.take().unwrap().wake();
-        assert_eq!(count.0.load(Ordering::SeqCst), 2);
-    }
-    #[test]
-    fn fifo_notification_does_not_complete_flush_until_serializer_is_empty() {
-        let mut io = Io { ready: VecDeque::new(), writes: std::vec![], armed: false };
-        let slot = Cell::new(None);
-        for _ in 0..3 {
-            assert_eq!(poll_tx(&mut io, &slot, TxOperation::Flush, Waker::noop().clone()).0, Poll::Pending);
-            io.disarm();
-            slot.take().unwrap().wake();
-        }
-        io.ready.push_back(true);
-        assert_eq!(poll_tx(&mut io, &slot, TxOperation::Flush, Waker::noop().clone()).0, Poll::Ready(()));
-        assert!(io.writes.is_empty());
-        assert!(!io.armed);
-        assert!(slot.take().is_none());
     }
 }

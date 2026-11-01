@@ -1,12 +1,15 @@
-# Async UART receive lifecycle
+# Async UART operation lifecycle
 
-`uart/async_receive.rs` owns the bounded receive poll and cancellation guard,
-shared by WS53 and WS63. It contains no PAC, scheduler, time queue or executor.
+`uart/async_wait.rs` owns one bounded operation poll and cancellation guard,
+shared by WS53/WS63 RX and WS53 TX/flush. The small backend interface supplies
+the operation's output/error and bounded attempt, arm and disarm methods.
+It contains no PAC, scheduler, time queue or executor. RX and TX do not maintain
+parallel copies of the register-check/rearm/recheck or cancellation algorithm.
 The public `embedded_io_async::Read` implementations still return one byte per
 nonempty successful read; an empty read does not touch hardware.
 
-Polling installs the current waker before any register access, masks receive
-notification, attempts one read, and, on WouldBlock, rearms and tries once more.
+Polling installs the current waker before any register access, masks the owned
+notification, attempts the operation, and, on WouldBlock, rearms and tries once more.
 An arrival during arming is either read on that second check or retains a
 hardware notification. A notification during poll may wake before Pending is
 returned: the executor must honor that wake. Empty/duplicate interrupts merely
@@ -43,6 +46,15 @@ Neither this algorithm nor a software waker prevents physical FIFO overrun.
   has its existing distinct nonblocking backend. This batch does not claim to
   unify their transmit semantics or to add BS2X interrupt-driven reception.
 
+WS53 TX supplies either one-byte acceptance or its existing FIFO-plus-serializer
+flush check to the common guard. Pending write has sent no byte; cancellation
+does not revoke bytes already accepted by earlier calls. Cancelling flush
+disarms notifications and preserves in-flight bytes. The adapter still owns the
+whole UART and uses the same IRQ acknowledgement, error-preserving status reads
+and unsafe cross-core handoff. Public signatures and empty-buffer behavior are
+unchanged. The operation guard is created and polled within the async body;
+dropping an unpolled public future never creates that guard or touches hardware.
+
 Do not mechanically replace WS53 interrupt acknowledgement with mask-only:
 FIFO/status retention and the two reads are part of the receive contract,
 whereas a GPIO edge may exist only in a pending latch. Hardware ownership and
@@ -50,10 +62,12 @@ register side effects remain backend responsibilities.
 
 ## Validation ownership
 
-The child owns eight common tests: arrival before/during arm, error preservation,
+The child owns thirteen common tests: arrival before/during arm, error preservation,
 waker replacement, wake during poll, unpolled drop, cancellation with retained
 arrival, coalesced/duplicate notifications and empty notification. These check
-software ordering and lifecycle with a retained FIFO model, not electrical or
+software ordering and lifecycle with retained FIFO models; TX tests also cover
+single-byte acceptance, pending repolls, wake during disarm, serializer-only
+flush completion and cancelled write/flush data preservation. They do not prove electrical or
 interrupt-controller behavior. The parent's QEMU and HIL evidence must identify
 the actual backend and model used. The parent now exercises actual WS63 RX/IRQ/cancellation against the shared
 WS63/BS2X FIFO model, including mask/reassert and one-byte notification. This

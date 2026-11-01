@@ -1,5 +1,5 @@
 //! Legacy WS63 UART register adapter; RX lifecycle is shared.
-use super::async_receive::{ReceiveWait, RxIo, WakerSlot};
+use super::async_wait::{Wait, WaitIo, WakerSlot};
 use super::{Uart, UartInstance, UartPort, uart_regs, write_fifo_blocking_levels};
 use crate::peripherals::{Uart0, Uart1, Uart2};
 use core::{cell::Cell, convert::Infallible, future::poll_fn, task::Waker};
@@ -32,9 +32,10 @@ struct PacRx<'a, 'd, T> {
     uart: &'a Uart<'d, T>,
     port: UartPort,
 }
-impl<T: UartInstance> RxIo for PacRx<'_, '_, T> {
+impl<T: UartInstance> WaitIo for PacRx<'_, '_, T> {
+    type Output = u8;
     type Error = Infallible;
-    fn read(&mut self) -> nb::Result<u8, Self::Error> {
+    fn try_complete(&mut self) -> nb::Result<u8, Self::Error> {
         // Use the same qualified status/data path as blocking reception.
         // The receive-count alias is not interchangeable across these chips.
         self.uart.read_byte().ok_or(nb::Error::WouldBlock)
@@ -53,7 +54,7 @@ impl<T: UartInstance> RxIo for PacRx<'_, '_, T> {
 }
 
 async fn read_one<T: UartInstance>(uart: &Uart<'_, T>, port: UartPort) -> u8 {
-    let mut wait = ReceiveWait::new(PacRx { uart, port }, PortSlot(port));
+    let mut wait = Wait::new(PacRx { uart, port }, PortSlot(port));
     match poll_fn(|cx| wait.poll(cx)).await {
         Ok(byte) => byte,
         Err(never) => match never {},
