@@ -39,6 +39,7 @@ Use these drivers on the owning hart with exclusive pin configuration and the
 documented non-reentrant GPIO ISR. A metadata lock does not arbitrate shared
 register RMWs with other cores or unrelated ISRs, and no cross-core handoff is
 established here. Physical IRQ/ack/cancellation timing needs fresh acceptance.
-BS21 async support is unchanged. The minimal `asynch::block_on` wake/idle defect
-and DMA safety are separate open work; use an executor that honors wakes during
-polling. No new HAL scheduler, Embassy dependency or stable graduation is added.
+BS21 async support is unchanged. The minimal `asynch::block_on` now records
+software wakes during polling, but its poll-to-WFI race and DMA safety remain
+separate open work; see [the rendezvous boundary](irq-rendezvous.md).
+No new HAL scheduler, Embassy dependency or stable graduation is added.

@@ -3,11 +3,12 @@
 //! Two pieces shared by the async drivers:
 //!
 //! * [`block_on`] — a minimal single-future executor. It polls the future and,
-//!   while it is `Pending`, sleeps the core with `wfi`. The hardware interrupt
+//!   while it is `Pending` without a recorded wake, sleeps the core with `wfi`. The hardware interrupt
 //!   that will eventually complete the future wakes the core, and `block_on`
 //!   re-polls. No allocator, no heap, no global executor — enough to drive one
 //!   `embedded-hal-async` future to completion. (For multitasking, run these
-//!   futures under a real executor such as Embassy instead.)
+//!   futures under a real executor such as Embassy instead.) This experimental
+//!   helper still has an unresolved IRQ-to-WFI race; see its limitations below.
 //!
 //! * [`IrqSignal`] — the bridge from an interrupt handler to a waiting future:
 //!   the driver's ISR calls [`IrqSignal::signal`]; the future polls
@@ -27,10 +28,36 @@ use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use critical_section::Mutex;
 use portable_atomic::{AtomicBool, Ordering};
 
-// A no-op waker: `block_on` re-polls after every `wfi`, so the waker itself does
-// not need to do anything — the `IrqSignal.fired` flag carries the real signal.
-static VTABLE: RawWakerVTable = RawWakerVTable::new(|_| RAW_WAKER, |_| {}, |_| {}, |_| {});
+// Static storage is necessary because a Future may retain its Waker after
+// returning Ready or unwinding. No Waker may refer to the block_on stack.
+// One active call owns this notification bit; late wakes are harmless spurious
+// notifications, including when a subsequent invocation owns it.
+static BLOCK_ON_ACTIVE: AtomicBool = AtomicBool::new(false);
+static BLOCK_ON_NOTIFIED: AtomicBool = AtomicBool::new(false);
+static VTABLE: RawWakerVTable = RawWakerVTable::new(
+    |_| RAW_WAKER,
+    |_| BLOCK_ON_NOTIFIED.store(true, Ordering::Release),
+    |_| BLOCK_ON_NOTIFIED.store(true, Ordering::Release),
+    |_| {},
+);
 const RAW_WAKER: RawWaker = RawWaker::new(core::ptr::null(), &VTABLE);
+
+struct BlockOnClaim;
+impl BlockOnClaim {
+    fn acquire() -> Self {
+        assert!(
+            BLOCK_ON_ACTIVE.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok(),
+            "block_on does not support nested or concurrent calls"
+        );
+        BLOCK_ON_NOTIFIED.store(false, Ordering::Relaxed);
+        Self
+    }
+}
+impl Drop for BlockOnClaim {
+    fn drop(&mut self) {
+        BLOCK_ON_ACTIVE.store(false, Ordering::Release);
+    }
+}
 
 #[inline]
 fn wait_for_interrupt() {
@@ -42,22 +69,45 @@ fn wait_for_interrupt() {
     core::hint::spin_loop();
 }
 
-/// Drive a single future to completion, sleeping (`wfi`) between polls.
+/// Drive one future, re-polling recorded wakes before considering `wfi`.
 ///
 /// Global interrupts must be enabled (`interrupt::enable_global`) and the
 /// completing peripheral's IRQ routed to its `on_interrupt`, or the `wfi` will
 /// never wake.
+///
+/// # Limitations
+/// Software wakes issued during polling are coalesced and cause another poll.
+/// **This is not yet an atomic sleep handoff:** an IRQ/wake after the notification
+/// check but before WFI can still be lost until another interrupt occurs. Use a
+/// platform-qualified executor where this window matters. This helper does not
+/// change the caller's interrupt enable state or reserve a timer/software IRQ.
+///
+/// # Panics
+/// Nested and concurrent calls are rejected before polling the new future.
+/// There is one static notification slot, not a task scheduler. A retained Waker
+/// stays memory-safe after completion and may cause a spurious poll in a later
+/// call; it carries no pointer to the completed future. The claim is released on
+/// return or unwinding (a panic-abort runtime does not return).
 pub fn block_on<F: Future>(fut: F) -> F::Output {
+    block_on_with_idle(fut, wait_for_interrupt)
+}
+
+fn block_on_with_idle<F: Future>(fut: F, mut idle: impl FnMut()) -> F::Output {
+    // Declared before the pinned future so its destructor also runs while this
+    // invocation owns the slot. No user code is polled/dropped under a CS.
+    let _claim = BlockOnClaim::acquire();
     let mut fut = core::pin::pin!(fut);
     // SAFETY: the vtable's clone returns the same null-data RawWaker; wake/drop
-    // are no-ops. Nothing dereferences the (null) data pointer.
+    // access only static atomic metadata. Nothing dereferences the data pointer.
     let waker = unsafe { Waker::from_raw(RAW_WAKER) };
     let mut cx = Context::from_waker(&waker);
     loop {
         if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
             return v;
         }
-        wait_for_interrupt();
+        if !BLOCK_ON_NOTIFIED.swap(false, Ordering::AcqRel) {
+            idle();
+        }
     }
 }
 
@@ -150,3 +200,7 @@ impl Default for IrqSignal {
 #[cfg(all(test, not(target_arch = "riscv32")))]
 #[path = "asynch/tests.rs"]
 mod tests;
+
+#[cfg(all(test, not(target_arch = "riscv32")))]
+#[path = "asynch/block_on_tests.rs"]
+mod block_on_tests;
