@@ -1,8 +1,9 @@
 # Executor-independent IRQ rendezvous
 
 `asynch::IrqSignal` is an experimental single-consumer, coalescing software
-signal. GPIO, UART, DMA and LSADC use the same `poll_wait` implementation;
-TIMER now uses the shared [one-shot lifecycle](timer-async.md), which additionally
+signal. UART, DMA and LSADC use the same `poll_wait` implementation;
+GPIO uses its [shared line lifecycle](gpio-async.md), and TIMER uses the shared
+[one-shot lifecycle](timer-async.md), which additionally
 owns arming and cancellation. Neither depends on Embassy or RTOS. Multiple hardware events do not become
 multiple queued completions.
 
