@@ -199,9 +199,13 @@ mod lifecycle_tests {
     use super::*;
     use core::cell::{Cell, RefCell};
     use std::{collections::VecDeque, sync::Arc, task::Wake};
-    struct Noop;
-    impl Wake for Noop {
-        fn wake(self: Arc<Self>) {}
+    // Unlike Waker::noop this has an observable reference count, and a stale
+    // notification after cancellation must fail the test rather than disappear.
+    struct CancelledWaiter;
+    impl Wake for CancelledWaiter {
+        fn wake(self: Arc<Self>) {
+            panic!("cancelled UART waiter was woken");
+        }
     }
     impl WakerSlot for &Cell<Option<Waker>> {
         fn replace(&self, waker: Option<Waker>) -> Option<Waker> {
@@ -245,7 +249,7 @@ mod lifecycle_tests {
     fn cancellation_releases_waiter_and_preserves_arrival_for_next_reader() {
         let fifo = Fifo::default();
         let slot = Cell::new(None);
-        let owner = Arc::new(Noop);
+        let owner = Arc::new(CancelledWaiter);
         let waker = Waker::from(owner.clone());
         let mut cx = Context::from_waker(&waker);
         let mut wait = ReceiveWait::new(&fifo, &slot);
