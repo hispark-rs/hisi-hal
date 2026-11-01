@@ -1,8 +1,9 @@
 # Executor-independent IRQ rendezvous
 
 `asynch::IrqSignal` is an experimental single-consumer, coalescing software
-signal. GPIO, UART, TIMER, DMA and LSADC use the same `poll_wait` implementation;
-it has no Embassy or RTOS dependency. Multiple hardware events do not become
+signal. GPIO, UART, DMA and LSADC use the same `poll_wait` implementation;
+TIMER now uses the shared [one-shot lifecycle](timer-async.md), which additionally
+owns arming and cancellation. Neither depends on Embassy or RTOS. Multiple hardware events do not become
 multiple queued completions.
 
 After `take_fired()` returns false, an ISR may fire before the future registers
@@ -20,8 +21,8 @@ in the caller's ISR context; this is not deferred execution.
 The driver owns hardware masking, acknowledgement, stopping and cancellation.
 It must stop/acknowledge the old operation before resetting software state.
 This change does not establish those invariants for every existing driver.
-In particular, the legacy TIMER cancellation/spurious-IRQ path, DMA buffer and
-stop safety, and the minimal `block_on` poll-to-WFI race remain separate audits.
+DMA buffer/stop safety and the minimal `block_on` poll-to-WFI race remain separate
+audits. The TIMER lifecycle has host/model evidence, not new physical qualification.
 Single-hart critical sections do not arbitrate control-core/shared hardware.
 
 Host tests in `src/asynch/tests.rs` cover arrival before/after registration,
