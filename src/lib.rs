@@ -143,6 +143,9 @@ pub mod timer;
 #[path = "timer_ws53.rs"]
 pub mod timer;
 mod timer_math;
+#[cfg(all(feature = "async", feature = "unstable", feature = "chip-ws53"))]
+#[path = "timer/async_alarm.rs"]
+mod timer_async;
 
 mod tcxo_words;
 /// UART serial driver (blocking and `embedded-io`).
