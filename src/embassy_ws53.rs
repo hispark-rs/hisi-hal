@@ -194,7 +194,7 @@ impl Ws53TimeDriver {
         };
         unsafe { interrupt::disable(CHANNEL.interrupt()) };
         // No polling loop and no MMIO within the driver metadata critical section.
-        let sample = resources.clock.poll_time_counter();
+        let sample = resources.clock.poll_counter();
         let (expired, next, now, retry) = self.with(|s| {
             s.accept(sample);
             let expired = s.queue.drain(s.last, false);
@@ -294,7 +294,7 @@ pub unsafe fn init(
                 return Err(InitError::TimerInterruptActive);
             }
         }
-        clock.time_source_ready().map_err(InitError::Clock)?;
+        clock.snapshot_ready().map_err(InitError::Clock)?;
         clock.read_counter().map_err(InitError::Clock)
     })();
     match check {

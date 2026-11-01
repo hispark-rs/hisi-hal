@@ -144,6 +144,20 @@ impl<'d> TimerDriver<'d> {
         };
     }
 
+    /// Query the enable bit without changing state or acknowledging an event.
+    #[instability::unstable]
+    pub fn is_enabled(&self, channel: TimerChannel) -> bool {
+        self.regs().timer0_control(channel.index()).read().bits() & 1 != 0
+    }
+
+    /// Mask delivery while preserving the channel configuration and raw status.
+    #[instability::unstable]
+    pub fn set_interrupt_mask(&self, channel: TimerChannel, masked: bool) {
+        let reg = self.regs().timer0_control(channel.index());
+        let value = reg.read().bits();
+        unsafe { reg.write(|w| w.bits((value & !8) | (u32::from(masked) << 3))) };
+    }
+
     /// Disable a timer channel.
     pub fn disable(&self, channel: TimerChannel) {
         let r = self.regs();

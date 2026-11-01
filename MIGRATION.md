@@ -1,3 +1,12 @@
+## Unreleased 0.7.0-alpha.10: hardware time capability preparation
+
+TIMER gains experimental `is_enabled` and (legacy IP) `set_interrupt_mask`.
+TCXO gains executor-independent retained `poll_counter`; WS53 also exposes
+`snapshot_ready`. These do not configure frequencies or prove cross-core ownership.
+The legacy `read_counter`/`read_counter32` APIs retain their signatures; they
+return `None` while a new nonblocking snapshot is outstanding instead of issuing
+a second refresh over it. Complete the retained poll before using other methods.
+
 # Migration From `hisi-riscv-hal`
 
 `hisi-riscv-hal 0.6.x` is the final release line under the original package
