@@ -64,6 +64,11 @@ pub fn block_on<F: Future>(fut: F) -> F::Output {
 /// One-shot interrupt→future signal: an ISR calls [`signal`](Self::signal), the
 /// future polls [`take_fired`](Self::take_fired) and parks via
 /// [`register`](Self::register). `const`-constructible for use in a `static`.
+///
+/// Each signal has one logical consumer: registering another waiter replaces
+/// the previous waiter. Drivers must enforce that ownership and quiesce old
+/// hardware activity before resetting/reusing the signal. This helper does not
+/// implement peripheral cancellation or an atomic poll-to-`wfi` transition.
 pub struct IrqSignal {
     fired: AtomicBool,
     waker: Mutex<Cell<Option<Waker>>>,
@@ -75,30 +80,64 @@ impl IrqSignal {
         Self { fired: AtomicBool::new(false), waker: Mutex::new(Cell::new(None)) }
     }
 
-    /// ISR side: mark the event fired and wake any parked waker.
+    /// ISR side: latch one event and wake the parked waiter outside the lock.
+    /// Multiple events coalesce until `take_fired` consumes the flag; this is not
+    /// an event counter. Waker callbacks must be safe in the calling ISR context.
     pub fn signal(&self) {
-        self.fired.store(true, Ordering::Release);
-        critical_section::with(|cs| {
-            if let Some(w) = self.waker.borrow(cs).take() {
-                w.wake();
-            }
+        let wake = critical_section::with(|cs| {
+            self.fired.store(true, Ordering::Release);
+            self.waker.borrow(cs).take()
         });
+        if let Some(waker) = wake {
+            waker.wake();
+        }
     }
 
-    /// Future side: park `waker` to be woken when the event fires.
+    /// Future side: register the current waiter. If an event arrived before
+    /// registration, wake immediately so a caller returning Pending is polled
+    /// again. Registration never consumes the event flag. Replacement, clone,
+    /// drop and wake callbacks all run outside the metadata critical section.
     pub fn register(&self, waker: &Waker) {
-        critical_section::with(|cs| self.waker.borrow(cs).set(Some(waker.clone())));
+        let cloned = waker.clone();
+        let (old, wake) = critical_section::with(|cs| {
+            let slot = self.waker.borrow(cs);
+            let old = slot.replace(Some(cloned));
+            let wake = if self.fired.load(Ordering::Acquire) { slot.take() } else { None };
+            (old, wake)
+        });
+        drop(old);
+        if let Some(waker) = wake {
+            waker.wake();
+        }
     }
 
-    /// Future side: consume the fired flag (`true` once per [`signal`](Self::signal)).
+    /// Consume the coalesced event flag once. After a false result, register the
+    /// waiter before returning Pending; `register` closes that arrival window.
     pub fn take_fired(&self) -> bool {
         self.fired.swap(false, Ordering::Acquire)
     }
 
-    /// Clear both the fired flag and any parked waker (call before arming).
+    /// Clear the current event and waiter before arming a new operation.
+    /// The driver must first quiesce/acknowledge its old hardware operation;
+    /// this only resets software state and cannot cancel a device transaction.
     pub fn reset(&self) {
-        self.fired.store(false, Ordering::Relaxed);
-        critical_section::with(|cs| self.waker.borrow(cs).set(None));
+        let old = critical_section::with(|cs| {
+            self.fired.store(false, Ordering::Relaxed);
+            self.waker.borrow(cs).take()
+        });
+        drop(old);
+    }
+
+    /// Common polling contract for peripheral wrappers. Ready consumes one
+    /// coalesced event; Pending always has either a parked waiter or a wake
+    /// already issued after an event arrived in the registration window.
+    pub(crate) fn poll_wait(&self, cx: &mut Context<'_>) -> Poll<()> {
+        if self.take_fired() {
+            Poll::Ready(())
+        } else {
+            self.register(cx.waker());
+            Poll::Pending
+        }
     }
 }
 
@@ -107,3 +146,7 @@ impl Default for IrqSignal {
         Self::new()
     }
 }
+
+#[cfg(all(test, not(target_arch = "riscv32")))]
+#[path = "asynch/tests.rs"]
+mod tests;

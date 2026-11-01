@@ -671,12 +671,7 @@ mod asynch_impl {
     impl Future for DelayFuture {
         type Output = ();
         fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-            if TIMER_SIGNAL[self.ch.index()].take_fired() {
-                Poll::Ready(())
-            } else {
-                TIMER_SIGNAL[self.ch.index()].register(cx.waker());
-                Poll::Pending
-            }
+            TIMER_SIGNAL[self.ch.index()].poll_wait(cx)
         }
     }
 

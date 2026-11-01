@@ -2161,12 +2161,7 @@ mod asynch_impl {
         type Output = ();
         fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
             let sig = &DMA_SIGNAL[(self.ch as usize).min(3)];
-            if sig.take_fired() {
-                Poll::Ready(())
-            } else {
-                sig.register(cx.waker());
-                Poll::Pending
-            }
+            sig.poll_wait(cx)
         }
     }
 

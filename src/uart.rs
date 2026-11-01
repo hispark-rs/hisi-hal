@@ -858,12 +858,7 @@ mod asynch_impl {
         type Output = ();
         fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
             let idx = self.port.index();
-            if UART_RX[idx].take_fired() {
-                Poll::Ready(())
-            } else {
-                UART_RX[idx].register(cx.waker());
-                Poll::Pending
-            }
+            UART_RX[idx].poll_wait(cx)
         }
     }
 

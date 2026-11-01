@@ -419,12 +419,7 @@ mod asynch_impl {
     impl Future for ConvFuture {
         type Output = ();
         fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-            if LSADC_SIGNAL.take_fired() {
-                Poll::Ready(())
-            } else {
-                LSADC_SIGNAL.register(cx.waker());
-                Poll::Pending
-            }
+            LSADC_SIGNAL.poll_wait(cx)
         }
     }
 

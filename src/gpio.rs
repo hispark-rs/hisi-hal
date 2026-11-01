@@ -636,12 +636,7 @@ mod asynch_impl {
     impl Future for GpioWaitFuture {
         type Output = ();
         fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-            if GPIO_SIGNAL[self.bank].take_fired() {
-                Poll::Ready(())
-            } else {
-                GPIO_SIGNAL[self.bank].register(cx.waker());
-                Poll::Pending
-            }
+            GPIO_SIGNAL[self.bank].poll_wait(cx)
         }
     }
 
