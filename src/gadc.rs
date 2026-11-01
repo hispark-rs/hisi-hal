@@ -407,7 +407,6 @@ mod proptests {
         #[test]
         fn delay_cycles_never_panic(us in any::<u32>()) {
             let cycles = us.saturating_mul(64);
-            prop_assert!(cycles <= u32::MAX);
             // Saturation: result is either the exact product (as u64) or u32::MAX.
             let exact = us as u64 * 64;
             if exact <= u32::MAX as u64 {

@@ -279,8 +279,12 @@ mod tests {
     #[test]
     fn code_range_constants_within_10_bits() {
         // The documented code range must fit in the 10-bit field the driver reads.
-        assert!(TEMP_CODE_MIN < TEMP_CODE_MAX);
-        assert!(TEMP_CODE_MAX <= 0x3FF);
+        const {
+            assert!(TEMP_CODE_MIN < TEMP_CODE_MAX);
+        }
+        const {
+            assert!(TEMP_CODE_MAX <= 0x3FF);
+        }
         assert_eq!(TEMP_CODE_MIN, 114);
         assert_eq!(TEMP_CODE_MAX, 896);
     }
@@ -324,7 +328,7 @@ mod tests {
         let ctrl = 0xFFFF_FFFF;
         let out = apply(ctrl, 0);
         // Bits 2:1 cleared, everything else stays set.
-        assert_eq!(out, 0xFFFF_FFFF & !0x06);
+        assert_eq!(out, !0x06);
     }
 
     #[test]

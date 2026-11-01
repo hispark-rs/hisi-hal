@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn signature_is_ascii_ot() {
         // The GSNPSID top-half signature is the ASCII bytes "OT" (0x4F, 0x54).
-        assert_eq!(SNPS_SIGNATURE, u16::from_be_bytes([b'O', b'T']));
+        assert_eq!(SNPS_SIGNATURE, u16::from_be_bytes(*b"OT"));
         assert_eq!(SNPS_SIGNATURE, 0x4F54);
     }
 

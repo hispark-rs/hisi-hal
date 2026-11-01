@@ -149,13 +149,13 @@ mod tests {
     #[test]
     fn test_pwm_channel_count_fits_u8() {
         // 8 PWM channels max, channel index 0-7
-        assert!(crate::soc::chip::PWM_CHANNEL_COUNT <= 8);
+        const { assert!(crate::soc::chip::PWM_CHANNEL_COUNT <= 8); }
     }
 
     #[test]
     fn test_dma_channel_bound_check() {
         // DMA channels 0-3 are valid, 4+ is out of bounds
-        assert!(crate::soc::chip::DMA_CHANNEL_COUNT == 4);
+        const { assert!(crate::soc::chip::DMA_CHANNEL_COUNT == 4); }
         for ch in 0u8..4 {
             assert!(ch < crate::soc::chip::DMA_CHANNEL_COUNT as u8);
         }

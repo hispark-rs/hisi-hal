@@ -752,7 +752,7 @@ mod tests {
     #[test]
     fn pad_clear_mask_preserves_other_bits() {
         // The RMW clears only PE+PS; every other bit (e.g. drive strength) survives.
-        let other = 0xFFFF_FFFFu32 & !(PAD_PE_BIT | PAD_PS_BIT);
+        let other = !(PAD_PE_BIT | PAD_PS_BIT);
         let v = other & !(PAD_PE_BIT | PAD_PS_BIT);
         assert_eq!(v, other);
     }

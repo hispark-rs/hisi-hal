@@ -464,7 +464,7 @@ impl embedded_hal::pwm::SetDutyCycle for PwmChannel<'_> {
 
 #[cfg(all(test, not(target_arch = "riscv32")))]
 mod tests {
-    use super::{Duty, PWM_CLOCK_HZ, PwmPeriod, PwmRunning};
+    use super::{Duty, PWM_CLOCK_HZ, PwmChannelId, PwmPeriod, PwmRunning};
 
     /// The `into_running` escape-hatch marker is zero-sized (a pure type-level proof
     /// token). The disabling-Drop register effect is HIL-validated on silicon — the
@@ -551,9 +551,16 @@ mod tests {
 
     #[test]
     fn channel_bounds() {
-        // `PwmChannel::new` asserts `channel < 8`; the valid range is exactly 0..8.
-        assert!((0u8..8).all(|c| c < 8));
-        assert!(8u8 >= 8);
+        // Exercise the public typed boundary rather than a copy of the range test.
+        for index in 0u8..=u8::MAX {
+            match PwmChannelId::from_index(index) {
+                Some(channel) => {
+                    assert!(index < 8);
+                    assert_eq!(channel.index(), index);
+                }
+                None => assert!(index >= 8),
+            }
+        }
     }
 }
 

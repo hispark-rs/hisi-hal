@@ -19,6 +19,7 @@ printf '%s\n' 'WS53 pre-release integration: remote overrides; not registry rele
 cargo generate-lockfile
 features=chip-ws53,rt,unstable,async,defmt
 cargo test --locked --target x86_64-unknown-linux-gnu --no-default-features --features "$features"
+cargo clippy --locked --target x86_64-unknown-linux-gnu --tests --no-default-features --features "$features" -- -D warnings
 cargo clippy --locked -Zbuild-std=core,alloc --target riscv32imfc-unknown-none-elf --no-default-features --features "$features" -- -D warnings
 # Cargo resolves optional dependencies even when these old-chip features do not
 # enable WS53. Until WS53 runtime support is published, preserve independent host and
@@ -26,6 +27,7 @@ cargo clippy --locked -Zbuild-std=core,alloc --target riscv32imfc-unknown-none-e
 # The registry-only release jobs remain separate and must still pass for release.
 for features in chip-ws63,rt,async,unstable chip-bs21,rt,unstable; do
     cargo test --locked --target x86_64-unknown-linux-gnu --no-default-features --features "$features"
+    cargo clippy --locked --target x86_64-unknown-linux-gnu --tests --no-default-features --features "$features" -- -D warnings
     cargo clippy --locked -Zbuild-std=core,alloc --target riscv32imfc-unknown-none-elf --no-default-features --features "$features" -- -D warnings
 done
 for features in chip-ws53 chip-bs21 chip-ws53,chip-ws63,unstable chip-ws53,chip-bs21,unstable; do

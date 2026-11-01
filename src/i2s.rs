@@ -601,9 +601,9 @@ mod tests {
         for &dw in &widths {
             for &ch in &chans {
                 let (bclk, fs_num, fs_ratio) = derive_dividers(dw, ch);
-                assert!(bclk >= 1 && bclk <= 0x7F, "bclk {bclk} out of 7-bit range for {dw:?}/{ch:?}");
-                assert!(fs_num >= 1 && fs_num <= 0x3FF, "fs_num {fs_num} out of 10-bit range");
-                assert!(fs_ratio >= 1 && fs_ratio <= 0x7FF, "fs_ratio {fs_ratio} out of 11-bit range");
+                assert!((1..=0x7F).contains(&bclk), "bclk {bclk} out of 7-bit range for {dw:?}/{ch:?}");
+                assert!((1..=0x3FF).contains(&fs_num), "fs_num {fs_num} out of 10-bit range");
+                assert!((1..=0x7FF).contains(&fs_ratio), "fs_ratio {fs_ratio} out of 11-bit range");
             }
         }
     }
