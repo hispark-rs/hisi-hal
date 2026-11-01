@@ -222,6 +222,30 @@ impl<'d, T: Instance> I2cTransfer<'d, T> {
     pub fn start(&mut self) -> Result<(), Error> {
         self.pair.start()
     }
+    /// Observe one bounded step without delaying or installing an interrupt.
+    /// `Ok(None)` keeps the transfer running. Completion or error closes the
+    /// requests and retains all owners; it does not prove physical bus drain,
+    /// coherent buffers or a recoverable peer state.
+    pub fn poll(&mut self) -> Result<Option<Completion>, Error> {
+        self.pair.poll().map(|state| match state {
+            PairProgress::Complete(done) => Some(done),
+            PairProgress::Pending | PairProgress::WaitingForStop => None,
+        })
+    }
+    /// Wait cooperatively for an already-started transfer using a separate
+    /// async timer. No I2C or DMA IRQ is installed; the timer must arrange each
+    /// wake and no deadline is implied. Cancellation after the first poll closes
+    /// requests and stops both attempted channels, retaining all owners. An
+    /// unpolled future does not alter the already-running transfer. Completion
+    /// does not establish bus drain, coherence or safe resource reclamation.
+    #[cfg(feature = "async")]
+    pub async fn wait_async<D: embedded_hal_async::delay::DelayNs>(
+        &mut self,
+        delay: &mut D,
+        interval_us: core::num::NonZeroU32,
+    ) -> Result<Completion, Error> {
+        super::timed_wait::wait(&mut self.pair, delay, interval_us).await
+    }
     /// One finite poll budget checks both DMA channels, I2C errors and final STOP.
     /// Four-beat RX tails lower the watermark once. Completion counts commands,
     /// not received bytes, and is not a physical drain/coherency certificate.
@@ -289,6 +313,11 @@ struct Pair<R: Registers, P: I2cRegisters> {
     requests_owned: bool,
     rx_level: u32,
 }
+enum PairProgress {
+    Pending,
+    WaitingForStop,
+    Complete(Completion),
+}
 impl<R: Registers, P: I2cRegisters> Pair<R, P> {
     fn start(&mut self) -> Result<(), Error> {
         if self.state != State::Ready {
@@ -335,12 +364,11 @@ impl<R: Registers, P: I2cRegisters> Pair<R, P> {
         }
         self.state = State::Retained;
     }
-    fn wait(&mut self, polls: NonZeroU16, delay: &mut impl DelayNs) -> Result<Completion, Error> {
+    fn poll(&mut self) -> Result<PairProgress, Error> {
         if self.state != State::Running {
             return Err(Error::NotReady);
         }
-        let mut result = Err(Error::Timeout);
-        for n in 0..polls.get() {
+        let result = (|| {
             let tx = self.tx.poll();
             let rx = self.rx.as_mut().map_or(Ok(Some(Completion { elements: 0 })), |e| e.poll());
             let error = match (tx, rx) {
@@ -349,48 +377,59 @@ impl<R: Registers, P: I2cRegisters> Pair<R, P> {
                 _ => None,
             };
             if let Some(e) = error {
-                result = Err(e);
-                break;
+                return Err(e);
             }
             let s = self.io.snapshot();
             if let Some(e) = s.error {
-                result = Err(e);
-                break;
+                return Err(e);
             }
             if !s.configured || !self.io.valid(true, self.rx.is_some(), self.rx_level) {
-                result = Err(Error::I2cConfiguration);
-                break;
+                return Err(Error::I2cConfiguration);
             }
             if let Some(rx) = &mut self.rx {
                 let progress = rx.io.status();
                 if progress.error {
-                    result = Err(Error::Bus);
-                    break;
+                    return Err(Error::Bus);
                 }
                 let remaining = progress.remaining;
                 if remaining > rx.source.count {
-                    result = Err(Error::CompletionState);
-                    break;
+                    return Err(Error::CompletionState);
                 }
                 if self.rx_level != 0 && remaining > 0 && remaining < 4 {
                     self.io.rx_level(0);
                     self.rx_level = 0;
                     if !self.io.valid(true, true, 0) {
-                        result = Err(Error::I2cConfiguration);
-                        break;
+                        return Err(Error::I2cConfiguration);
                     }
                 }
             }
             if let (Ok(Some(done)), Ok(Some(_))) = (tx, rx) {
                 if s.rx_count != 0 {
-                    result = Err(Error::I2cResidualReceive);
-                    break;
+                    return Err(Error::I2cResidualReceive);
                 }
                 if s.idle && s.stop {
-                    result = Ok(done);
-                    break;
+                    return Ok(PairProgress::Complete(done));
                 }
-                result = Err(Error::TransmitTimeout);
+                return Ok(PairProgress::WaitingForStop);
+            }
+            Ok(PairProgress::Pending)
+        })();
+        if !matches!(result, Ok(PairProgress::Pending | PairProgress::WaitingForStop)) {
+            self.stop();
+        }
+        result
+    }
+    fn wait(&mut self, polls: NonZeroU16, delay: &mut impl DelayNs) -> Result<Completion, Error> {
+        if self.state != State::Running {
+            return Err(Error::NotReady);
+        }
+        let mut result = Err(Error::Timeout);
+        for n in 0..polls.get() {
+            match self.poll() {
+                Ok(PairProgress::Pending) => {}
+                Ok(PairProgress::WaitingForStop) => result = Err(Error::TransmitTimeout),
+                Ok(PairProgress::Complete(done)) => return Ok(done),
+                Err(error) => return Err(error),
             }
             if n + 1 < polls.get() {
                 delay.delay_us(1);
@@ -398,6 +437,21 @@ impl<R: Registers, P: I2cRegisters> Pair<R, P> {
         }
         self.stop();
         result
+    }
+}
+#[cfg(feature = "async")]
+impl<R: Registers, P: I2cRegisters> super::timed_wait::TimedTransfer for Pair<R, P> {
+    fn running(&self) -> bool {
+        self.state == State::Running
+    }
+    fn poll_step(&mut self) -> Result<Option<Completion>, Error> {
+        self.poll().map(|state| match state {
+            PairProgress::Complete(done) => Some(done),
+            PairProgress::Pending | PairProgress::WaitingForStop => None,
+        })
+    }
+    fn stop(&mut self) {
+        Pair::stop(self);
     }
 }
 impl<R: Registers, P: I2cRegisters> Drop for Pair<R, P> {

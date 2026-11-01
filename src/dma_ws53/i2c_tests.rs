@@ -362,6 +362,72 @@ fn completion_requires_both_channels_clean_fifo_idle_and_fresh_stop() {
     }
 }
 #[test]
+fn incremental_poll_waits_for_stop_and_preserves_tail_and_resources() {
+    let (mut p, events) = pair(true);
+    assert!(matches!(p.poll(), Err(Error::NotReady)));
+    p.rx.as_mut().unwrap().io.tail = true;
+    p.start().unwrap();
+    p.io.snapshot.stop = false;
+    assert!(matches!(p.poll(), Ok(PairProgress::Pending)));
+    assert_eq!(events.borrow().iter().filter(|v| **v == "tail").count(), 1);
+    assert!(matches!(p.poll(), Ok(PairProgress::WaitingForStop)));
+    assert!(!events.borrow().contains(&"off"));
+    p.io.snapshot.stop = true;
+    assert!(matches!(p.poll(), Ok(PairProgress::Complete(done)) if done.elements() == 17));
+    assert_eq!(&events.borrow()[7..], &["off", "tx-stop", "rx-stop"]);
+    assert!(matches!(p.poll(), Err(Error::NotReady)));
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn timed_wait_cancellation_completion_and_error_preserve_i2c_owners() {
+    use core::{
+        future::Future,
+        num::NonZeroU32,
+        task::{Context, Poll, Waker},
+    };
+    struct Timer(bool);
+    impl embedded_hal_async::delay::DelayNs for Timer {
+        async fn delay_ns(&mut self, _: u32) {
+            if self.0 {
+                core::future::pending::<()>().await;
+            }
+        }
+    }
+    let interval = NonZeroU32::new(1).unwrap();
+    let mut cx = Context::from_waker(Waker::noop());
+    for receive in [false, true] {
+        let (mut p, events) = pair(receive);
+        p.start().unwrap();
+        let mut timer = Timer(true);
+        let mut future = Box::pin(super::super::timed_wait::wait(&mut p, &mut timer, interval));
+        assert!(future.as_mut().poll(&mut cx).is_pending());
+        drop(future);
+        assert!(events.borrow().contains(&"off"));
+        assert_eq!(events.borrow().iter().filter(|v| **v == "tx-stop").count(), 1);
+        assert_eq!(events.borrow().iter().filter(|v| **v == "rx-stop").count(), usize::from(receive));
+        assert!(matches!(p.poll(), Err(Error::NotReady)));
+
+        let (mut p, events) = pair(receive);
+        p.start().unwrap();
+        let mut timer = Timer(false);
+        drop(super::super::timed_wait::wait(&mut p, &mut timer, interval));
+        assert!(!events.borrow().contains(&"off"));
+        let mut future = Box::pin(super::super::timed_wait::wait(&mut p, &mut timer, interval));
+        assert_eq!(future.as_mut().poll(&mut cx), Poll::Ready(Ok(Completion { elements: 17 })));
+        drop(future);
+        assert!(events.borrow().contains(&"off"));
+    }
+    let (mut p, events) = pair(true);
+    p.start().unwrap();
+    p.rx.as_mut().unwrap().io.error = true;
+    let mut timer = Timer(false);
+    let mut future = Box::pin(super::super::timed_wait::wait(&mut p, &mut timer, interval));
+    assert_eq!(future.as_mut().poll(&mut cx), Poll::Ready(Err(Error::Bus)));
+    drop(future);
+    assert!(events.borrow().contains(&"off"));
+}
+#[test]
 fn drop_and_forget_never_reclaim_running_resources() {
     let (p, e) = pair(true);
     drop(p);
