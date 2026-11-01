@@ -1,7 +1,7 @@
 //! Shared, bounded UART receive polling. No executor, queue or PAC access.
 #[cfg(test)]
 use core::cell::Cell;
-use core::task::{Poll, Waker};
+use core::task::{Context, Poll, Waker};
 
 // Metadata only: no MMIO, callbacks, Waker cloning or destruction under CS.
 pub(super) trait WakerSlot {
@@ -46,6 +46,35 @@ pub(super) fn poll_rx<I: RxIo>(io: &mut I, slot: &impl WakerSlot, waker: Waker) 
                 Err(nb::Error::WouldBlock) => unreachable!(),
             };
             (Poll::Ready(result), old, slot.take())
+        }
+    }
+}
+
+/// Own the one outstanding receive operation, including cancellation cleanup.
+/// No byte is consumed on Pending. Cancellation masks notification, releases
+/// the waker and leaves the FIFO untouched. The I/O backend retains ownership
+/// of its UART borrow until this guard is dropped.
+pub(super) struct ReceiveWait<I: RxIo, S: WakerSlot> {
+    io: I,
+    slot: S,
+    started: bool,
+}
+impl<I: RxIo, S: WakerSlot> ReceiveWait<I, S> {
+    pub(super) fn new(io: I, slot: S) -> Self {
+        Self { io, slot, started: false }
+    }
+    pub(super) fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<u8, I::Error>> {
+        self.started = true;
+        let (result, old, completed) = poll_rx(&mut self.io, &self.slot, cx.waker().clone());
+        drop((old, completed));
+        result
+    }
+}
+impl<I: RxIo, S: WakerSlot> Drop for ReceiveWait<I, S> {
+    fn drop(&mut self) {
+        if self.started {
+            self.io.disarm();
+            drop(self.slot.take());
         }
     }
 }
@@ -162,5 +191,107 @@ mod tests {
         assert!(poll_rx(&mut io, &slot, Waker::from(count.clone())).0.is_pending());
         slot.take().unwrap().wake();
         assert_eq!(count.0.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "riscv32")))]
+mod lifecycle_tests {
+    use super::*;
+    use core::cell::{Cell, RefCell};
+    use std::{collections::VecDeque, sync::Arc, task::Wake};
+    struct Noop;
+    impl Wake for Noop {
+        fn wake(self: Arc<Self>) {}
+    }
+    impl WakerSlot for &Cell<Option<Waker>> {
+        fn replace(&self, waker: Option<Waker>) -> Option<Waker> {
+            Cell::replace(self, waker)
+        }
+    }
+    #[derive(Default)]
+    struct Fifo {
+        bytes: RefCell<VecDeque<u8>>,
+        armed: Cell<bool>,
+        masks: Cell<usize>,
+    }
+    impl RxIo for &Fifo {
+        type Error = core::convert::Infallible;
+        fn read(&mut self) -> nb::Result<u8, Self::Error> {
+            self.bytes.borrow_mut().pop_front().ok_or(nb::Error::WouldBlock)
+        }
+        fn arm(&mut self) {
+            self.armed.set(true);
+        }
+        fn disarm(&mut self) {
+            self.armed.set(false);
+            self.masks.set(self.masks.get() + 1);
+        }
+    }
+    fn notify(fifo: &Fifo, slot: &Cell<Option<Waker>>) {
+        (&*fifo).disarm();
+        if let Some(waker) = slot.take() {
+            waker.wake();
+        }
+    }
+    #[test]
+    fn unpolled_drop_does_not_touch_backend_or_an_existing_waker() {
+        let fifo = Fifo::default();
+        let slot = Cell::new(Some(Waker::noop().clone()));
+        drop(ReceiveWait::new(&fifo, &slot));
+        assert_eq!(fifo.masks.get(), 0);
+        assert!(slot.take().is_some());
+    }
+    #[test]
+    fn cancellation_releases_waiter_and_preserves_arrival_for_next_reader() {
+        let fifo = Fifo::default();
+        let slot = Cell::new(None);
+        let owner = Arc::new(Noop);
+        let waker = Waker::from(owner.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut wait = ReceiveWait::new(&fifo, &slot);
+        assert!(wait.poll(&mut cx).is_pending());
+        assert!(fifo.armed.get());
+        assert_eq!(Arc::strong_count(&owner), 3);
+        fifo.bytes.borrow_mut().push_back(0x53);
+        drop(wait);
+        assert!(!fifo.armed.get());
+        assert!(slot.take().is_none());
+        assert_eq!(Arc::strong_count(&owner), 2);
+        // A late notification cannot consume the retained byte.
+        notify(&fifo, &slot);
+        let mut next = ReceiveWait::new(&fifo, &slot);
+        assert_eq!(next.poll(&mut cx), Poll::Ready(Ok(0x53)));
+        assert!(!fifo.armed.get());
+    }
+    #[test]
+    fn coalesced_and_duplicate_notifications_never_overwrite_unread_bytes() {
+        let fifo = Fifo::default();
+        let slot = Cell::new(None);
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut wait = ReceiveWait::new(&fifo, &slot);
+        assert!(wait.poll(&mut cx).is_pending());
+        fifo.bytes.borrow_mut().extend([0x11, 0x22, 0x33]);
+        notify(&fifo, &slot);
+        notify(&fifo, &slot);
+        assert_eq!(fifo.bytes.borrow().len(), 3);
+        assert_eq!(wait.poll(&mut cx), Poll::Ready(Ok(0x11)));
+        drop(wait);
+        for byte in [0x22, 0x33] {
+            let mut next = ReceiveWait::new(&fifo, &slot);
+            assert_eq!(next.poll(&mut cx), Poll::Ready(Ok(byte)));
+        }
+        assert!(fifo.bytes.borrow().is_empty());
+    }
+    #[test]
+    fn empty_notification_rearms_without_returning_a_fabricated_byte() {
+        let fifo = Fifo::default();
+        let slot = Cell::new(None);
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut wait = ReceiveWait::new(&fifo, &slot);
+        assert!(wait.poll(&mut cx).is_pending());
+        notify(&fifo, &slot);
+        assert!(wait.poll(&mut cx).is_pending());
+        assert!(fifo.armed.get());
+        assert!(slot.take().is_some());
     }
 }

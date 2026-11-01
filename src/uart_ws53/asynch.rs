@@ -1,5 +1,5 @@
 //! Single-hart RX/TX adapters, each exclusively borrowing the whole UART.
-use super::async_receive::{RxIo, WakerSlot, poll_rx};
+use super::async_receive::{ReceiveWait, RxIo, WakerSlot};
 use super::{ReceiveError, ReceiveInterrupt, Uart, UartInstance, uart_regs};
 use crate::interrupt;
 use core::{
@@ -104,20 +104,6 @@ fn cancel<T: UartInstance>(uart: &mut Uart<'_, T>) {
     let old = PortSlot(T::PORT).take();
     drop(old);
 }
-struct ReadWait<'a, 'd, T: UartInstance>(&'a mut Uart<'d, T>);
-impl<T: UartInstance> ReadWait<'_, '_, T> {
-    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<u8, ReceiveError>> {
-        let waker = cx.waker().clone();
-        let (result, old, completed) = poll_rx(&mut PacRx(self.0), &PortSlot(T::PORT), waker);
-        drop((old, completed));
-        result
-    }
-}
-impl<T: UartInstance> Drop for ReadWait<'_, '_, T> {
-    fn drop(&mut self) {
-        cancel(self.0);
-    }
-}
 impl<T: UartInstance> Drop for AsyncReceiver<'_, '_, T> {
     fn drop(&mut self) {
         cancel(self.uart);
@@ -131,7 +117,7 @@ impl<T: UartInstance> embedded_io_async::Read for AsyncReceiver<'_, '_, T> {
         if buf.is_empty() {
             return Ok(0);
         }
-        let mut wait = ReadWait(&mut *self.uart);
+        let mut wait = ReceiveWait::new(PacRx(&mut *self.uart), PortSlot(T::PORT));
         let byte = poll_fn(|cx| wait.poll(cx)).await?;
         buf[0] = byte;
         Ok(1)
