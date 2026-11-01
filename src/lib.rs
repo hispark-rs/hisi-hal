@@ -4,8 +4,16 @@
 //! peripherals. Modeled on esp-hal patterns with typed GPIO drivers, audited
 //! clock metadata, typed identities, and embedded-hal trait implementations.
 //!
+//! WS53 is an experimental RAM-takeover backend (`chip-ws53,unstable`). Only
+//! audited MCU subsets are exposed; consult the WS53 capability/evidence matrix
+//! for each driver, model and hardware status. Required clocks/configuration
+//! must be established from an audited boot environment. Peripheral tokens require an explicit ownership
+//! handoff before driver construction; no global clock or sleep compensation
+//! is provided by the WS53 backend.
+//!
 //! ## Clock gating
 //!
+//! The following describes the existing WS63 integration, not WS53 clock setup.
 //! Most peripherals need their CLDO_CRG clock gate enabled before register
 //! access. The gates default to enabled out of reset; `clock_init::init_clocks()`
 //! sets up the system clocks for firmware that does not boot through flashboot.
@@ -46,9 +54,13 @@
 
 // Exactly one chip must be selected (each pulls its PAC + soc/<chip>.rs). There is
 // NO default chip (esp-hal style) — every consumer names one explicitly.
-#[cfg(all(feature = "chip-ws63", feature = "chip-bs21"))]
-compile_error!("hisi-hal: select exactly ONE chip feature — `chip-ws63` OR `chip-bs21`, not both.");
-#[cfg(not(any(feature = "chip-ws63", feature = "chip-bs21")))]
+#[cfg(any(
+    all(feature = "chip-ws63", feature = "chip-bs21"),
+    all(feature = "chip-ws53", feature = "chip-ws63"),
+    all(feature = "chip-ws53", feature = "chip-bs21")
+))]
+compile_error!("hisi-hal: select exactly ONE chip feature — `chip-ws63`, `chip-bs21` or `chip-ws53`.");
+#[cfg(not(any(feature = "chip-ws63", feature = "chip-bs21", feature = "chip-ws53")))]
 compile_error!(
     "hisi-hal: no chip selected — enable exactly one chip feature, e.g. \
      `features = [\"chip-ws63\"]` (WS63) or `features = [\"chip-bs21\", \"unstable\"]` (BS2X). \
@@ -60,6 +72,9 @@ compile_error!(
      `features = [\"chip-bs21\", \"unstable\"]`."
 );
 
+#[cfg(all(feature = "chip-ws53", not(feature = "unstable")))]
+compile_error!("hisi-hal: chip-ws53 requires unstable; WS53 is not yet silicon-qualified.");
+
 // ── Internal helper macros (must come before any `unstable_module!` use) ────
 // Crate-local `unstable_module!`/`unstable_driver!` + the `#[macro_export]`'d
 // `any_peripheral!`/`infallible!`. Private module — the gating macros are NOT
@@ -68,21 +83,41 @@ compile_error!(
 // macros still land at the crate root for downstream use regardless.
 #[macro_use]
 mod macros;
+mod gpio_traits;
 
 // ── Chip-neutral core (compiles for every chip) ────────────────────────────
 unstable_module! {
     /// Busy-wait delay providers (`embedded-hal` `DelayNs`).
-    pub mod delay;
+    #[cfg(not(feature = "chip-ws53"))]
+pub mod delay;
 }
+/// WS53 control logic/clock domain release after exclusive platform handoff.
+#[cfg(feature = "chip-ws53")]
+#[path = "control_domain_ws53.rs"]
+pub mod control_domain;
 /// GPIO drivers: type-erased `AnyPin`, typed `Input`/`Output`/`Flex`.
+#[cfg(not(feature = "chip-ws53"))]
+pub mod gpio;
+/// WS53 digital GPIO attached to an externally prepared pad and clock.
+#[cfg(feature = "chip-ws53")]
+#[path = "gpio_ws53.rs"]
 pub mod gpio;
 /// Interrupt controller access and IRQ enable/handler registration.
 pub mod interrupt;
+/// WS53 hardware IPC doorbells; shared-memory and firmware protocols are external.
+#[cfg(feature = "chip-ws53")]
+#[path = "ipc_ws53.rs"]
+pub mod ipc;
 /// Peripheral singleton tokens and the `Peripherals` struct (`take()`/`steal()`).
 pub mod peripherals;
+/// WS53 pad and mux configuration after explicit ownership/clock handoff.
+#[cfg(feature = "chip-ws53")]
+#[path = "pinctrl_ws53.rs"]
+pub mod pinctrl;
 /// Common re-exports for `use hisi_hal::prelude::*;`.
 pub mod prelude;
 // Sealed marker traits restricting external trait implementations.
+#[cfg(not(feature = "chip-ws53"))]
 mod private;
 /// SoC-specific constants and PAC aliases for the selected chip.
 pub mod soc;
@@ -92,11 +127,24 @@ unstable_module! {
     pub mod software_interrupt;
 }
 /// TCXO always-on clock/counter driver.
+#[cfg(not(feature = "chip-ws53"))]
+pub mod tcxo;
+/// WS53 raw TCXO ticks with exclusive snapshot handoff and bounded polling.
+#[cfg(feature = "chip-ws53")]
+#[path = "tcxo_ws53.rs"]
 pub mod tcxo;
 /// Time/frequency newtypes (`Hertz`, durations) used across the HAL.
 pub mod time;
 /// General-purpose hardware timer driver.
+#[cfg(not(feature = "chip-ws53"))]
 pub mod timer;
+/// WS53 two-channel TIMER v150 backend.
+#[cfg(feature = "chip-ws53")]
+#[path = "timer_ws53.rs"]
+pub mod timer;
+mod timer_math;
+
+mod tcxo_words;
 /// UART serial driver (blocking and `embedded-io`).
 pub mod uart;
 unstable_module! {
@@ -135,19 +183,49 @@ unstable_module! {
 // is chip-ws63-only within the module; BS2X gets mem-to-mem.
 unstable_module! {
     /// DMA controllers (Dma0/Sdma0): mem-to-mem and peripheral-paced transfers.
-    pub mod dma;
+    #[cfg(not(feature = "chip-ws53"))]
+pub mod dma;
 }
+/// WS53 ROM v151 MDMA with explicit coherent-memory and ownership handoff.
+#[cfg(feature = "chip-ws53")]
+#[path = "dma_ws53.rs"]
+pub mod dma;
 /// eFuse one-time-programmable memory access.
 #[cfg(feature = "chip-ws63")]
 pub mod efuse;
-// Chip-neutral: the embassy-time driver reads TCXO_HZ/TIMER_CLOCK_HZ and the
-// alarm interrupt from `soc::chip`, and the TCXO/TIMER register blocks are
-// register-identical across WS63 and BS2X (verified vs fbb_ws63 / fbb_bs2x).
+/// WS53 eFuse read-service view; no programming or provisioning API.
+#[cfg(feature = "chip-ws53")]
+#[path = "efuse_ws53.rs"]
+pub mod efuse;
+/// WS53 unkeyed HASH with explicit SPACC handoff and retained static DMA memory.
+#[cfg(feature = "chip-ws53")]
+#[path = "hash_ws53.rs"]
+pub mod hash;
+/// WS53 shared keyslot/clear-loader with explicit ownership and retained failures.
+#[cfg(feature = "chip-ws53")]
+#[path = "km_ws53.rs"]
+pub mod km;
+/// Experimental WS53 SDIO formats and bounded initialization; no DMA submission.
+#[cfg(feature = "chip-ws53")]
+#[path = "sdio_ws53.rs"]
+pub mod sdio;
+/// WS53 block cipher transfers with retained SPACC, static DMA and KM leases.
+#[cfg(feature = "chip-ws53")]
+#[path = "symc_ws53.rs"]
+pub mod symc;
+// The embassy driver obtains clocks/IRQ from `soc::chip`; TCXO counter layout
+// is selected separately for WS63 (two words) and BS21 (four halfword fields).
 unstable_driver! {
     /// embassy-time `Driver` implementation backed by TCXO/TIMER for `embassy-executor`.
     #[cfg(feature = "embassy")]
+    #[cfg(not(feature = "chip-ws53"))]
     pub mod embassy;
 }
+#[cfg(all(feature = "chip-ws53", feature = "embassy"))]
+#[path = "embassy_ws53.rs"]
+pub mod embassy;
+#[cfg(all(feature = "embassy", feature = "unstable"))]
+mod embassy_time_math;
 // I2C is a DIFFERENT IP per chip: WS63 has a custom v150 core (i2c.rs), BS2X has a
 // Synopsys DesignWare v151 core (i2c_v151.rs). Both are exposed as `hal::i2c`; the
 // register blocks come from each chip's PAC (the BS2X v151 layout was rewritten
@@ -155,14 +233,26 @@ unstable_driver! {
 /// I2C driver (WS63 custom v150 core).
 #[cfg(feature = "chip-ws63")]
 pub mod i2c;
+#[cfg(any(feature = "chip-ws53", feature = "chip-bs21"))]
+mod i2c_plan;
+#[cfg(any(feature = "chip-ws53", feature = "chip-bs21"))]
+mod i2c_v151_abort;
 unstable_module! {
     /// I2C driver (BS2X Synopsys DesignWare v151 core).
     #[cfg(feature = "chip-bs21")]
     #[path = "i2c_v151.rs"]
     pub mod i2c;
 }
+#[cfg(feature = "chip-ws53")]
+#[path = "i2c_ws53.rs"]
+/// Experimental WS53 I2C v151 master with bounded recovery.
+pub mod i2c;
 /// I2S audio interface driver.
 #[cfg(feature = "chip-ws63")]
+pub mod i2s;
+#[cfg(feature = "chip-ws53")]
+#[path = "i2s_ws53.rs"]
+/// Experimental WS53 stereo I2S streams with explicit FIFO completion semantics.
 pub mod i2s;
 /// Pin mux / pad I/O configuration helpers.
 #[cfg(feature = "chip-ws63")]
@@ -172,6 +262,9 @@ unstable_module! {
     #[cfg(feature = "chip-ws63")]
     pub mod km;
 }
+#[cfg(feature = "chip-ws53")]
+#[path = "adc_ws53.rs"]
+pub mod adc;
 /// Low-speed ADC (v154) driver.
 #[cfg(feature = "chip-ws63")]
 pub mod lsadc;
@@ -222,6 +315,11 @@ unstable_module! {
 // BS2X v151), rtc (v100 vs v150), lsadc (v154 vs v153), i2s/sfc (no BS2X instance),
 // and the clock/crypto/system stack (deeper port).
 /// PWM driver (v151) with typed `PwmPeriod`/`Duty` config.
+#[cfg(not(feature = "chip-ws53"))]
+pub mod pwm;
+/// Experimental WS53 application PWM: four groups, eight channels.
+#[cfg(feature = "chip-ws53")]
+#[path = "pwm_ws53.rs"]
 pub mod pwm;
 // RTC is a different IP per chip: WS63 v100 (rtc.rs), BS2X v150 (rtc_v150.rs, a
 // 64-bit counter with a coherent-read handshake). Both exposed as `hal::rtc`.
@@ -236,6 +334,10 @@ unstable_module! {
     #[path = "rtc_v150.rs"]
     pub mod rtc;
 }
+/// WS53 two-channel RTC v150, audited 32-bit application profile.
+#[cfg(feature = "chip-ws53")]
+#[path = "rtc_ws53.rs"]
+pub mod rtc;
 unstable_module! {
     /// Functional-safety / lockstep support driver.
     #[cfg(feature = "chip-ws63")]
@@ -251,8 +353,18 @@ unstable_module! {
     #[cfg(feature = "chip-ws63")]
     pub mod sfc;
 }
+#[cfg(feature = "chip-ws53")]
+#[path = "sfc_ws53.rs"]
+pub mod sfc;
 /// SPI driver (v151), blocking and `embedded-hal`.
+#[cfg(not(feature = "chip-ws53"))]
 pub mod spi;
+/// WS53 SPI0/QSPI1 experimental single-line blocking master.
+#[cfg(feature = "chip-ws53")]
+#[path = "spi_ws53.rs"]
+pub mod spi;
+mod spi_clock;
+mod spi_transfer;
 /// System control block access and the `System` token.
 #[cfg(feature = "chip-ws63")]
 pub mod system;
@@ -265,6 +377,10 @@ unstable_module! {
 /// True random number generator driver (WS63).
 #[cfg(feature = "chip-ws63")]
 pub mod trng;
+/// WS53 shared-security TRNG with explicit service handoff and bounded reads.
+#[cfg(feature = "chip-ws53")]
+#[path = "trng_ws53.rs"]
+pub mod trng;
 unstable_module! {
     /// True random number generator driver (BS2X v1).
     #[cfg(feature = "chip-bs21")]
@@ -274,11 +390,21 @@ unstable_module! {
 /// On-chip temperature sensor driver.
 #[cfg(feature = "chip-ws63")]
 pub mod tsensor;
+/// WS53 source-profile polling temperature sensor; no inferred stop or IRQ.
+#[cfg(feature = "chip-ws53")]
+#[path = "tsensor_ws53.rs"]
+pub mod tsensor;
 unstable_module! {
     /// Ultra-low-power GPIO driver (GPIO v150 block).
-    pub mod ulp_gpio;
+    #[cfg(not(feature = "chip-ws53"))]
+pub mod ulp_gpio;
 }
 /// Watchdog timer driver (v151).
+#[cfg(not(feature = "chip-ws53"))]
+pub mod wdt;
+/// WS53 watchdog v151 with explicit clock/resource handoff.
+#[cfg(feature = "chip-ws53")]
+#[path = "wdt_ws53.rs"]
 pub mod wdt;
 
 /// Re-export of the peripheral singleton token struct.

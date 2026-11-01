@@ -624,6 +624,12 @@ use embedded_dma::{ReadBuffer, WriteBuffer};
 /// [`crate::cache::invalidate_range`]).
 pub const DMA_ALIGN: usize = 32;
 
+// An invalidation must not discard dirty data outside the owned destination.
+#[cfg(feature = "chip-ws63")]
+fn cache_line_destination(addr: usize, bytes: usize) -> bool {
+    bytes != 0 && addr.is_multiple_of(DMA_ALIGN) && bytes.is_multiple_of(DMA_ALIGN) && addr.checked_add(bytes).is_some()
+}
+
 /// Bounded completion poll for [`Transfer::wait`] — a wedged channel returns control
 /// (the transfer is then treated as done) instead of spinning the CPU forever.
 const DMA_WAIT_LOOPS: u32 = 5_000_000;
@@ -633,17 +639,28 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// for its whole lifetime, returning a [`Transfer`] guard you [`wait`] to reclaim
     /// the driver + buffers.
     ///
-    /// Because the guard owns the buffers (and aborts the channel on `Drop`), a
-    /// use-after-free of an in-flight DMA region is **unrepresentable in safe code**:
-    /// the buffers cannot be touched, moved, or freed while the DMA reads/writes them.
+    /// Buffers must be owned or statically borrowed: forgetting the guard must
+    /// not let an in-flight DMA access a returned stack allocation. This bound
+    /// does not prove completion, bus drain, or cache-line exclusivity.
     /// The source cache lines are cleaned before launch and the destination
     /// invalidated on `wait()` (the WS63 core is non-coherent), so the cache
     /// maintenance lives inside the type rather than being a caller obligation.
     ///
-    /// The DMA beat is a 32-bit word (`Word = u32`); buffers should be
-    /// [`DMA_ALIGN`]-aligned. The transfer length is `min(src.len(), dst.len())` words.
+    /// The DMA beat is a 32-bit word (`Word = u32`); the transfer length is
+    /// `min(src.len(), dst.len())` words. On WS63 the destination address and
+    /// transfer length must each be a nonzero multiple of [`DMA_ALIGN`].
+    /// A zero-length transfer is rejected before enabling the controller.
     ///
     /// [`wait`]: Transfer::wait
+    ///
+    /// A borrowed stack allocation cannot be supplied:
+    /// ```compile_fail
+    /// # use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver};
+    /// fn borrowed<'a>(driver: DmaDriver<'static, Dma0>, channel: DmaChannel,
+    ///                 src: &'a [u32], dst: &'a mut [u32]) {
+    ///     let _guard = driver.start_mem_to_mem(channel, src, dst);
+    /// }
+    /// ```
     #[instability::unstable]
     pub fn start_mem_to_mem<SRC, DST>(
         mut self,
@@ -652,19 +669,27 @@ impl<'d> DmaDriver<'d, Dma0> {
         mut dst: DST,
     ) -> Result<Transfer<'d, SRC, DST>, DmaStartError<'d, SRC, DST>>
     where
-        SRC: ReadBuffer<Word = u32>,
-        DST: WriteBuffer<Word = u32>,
+        SRC: ReadBuffer<Word = u32> + 'static,
+        DST: WriteBuffer<Word = u32> + 'static,
     {
         // SAFETY: `src`/`dst` are moved into the returned Transfer and held until
         // wait() reclaims them, so these pointers stay valid for the whole transfer.
         let (src_ptr, src_len) = unsafe { src.read_buffer() };
         let (dst_ptr, dst_len) = unsafe { dst.write_buffer() };
         let words = src_len.min(dst_len);
+        if words == 0 {
+            return Err(DmaStartError { error: DmaError::EmptyBuffer, driver: self, channel, src, dst });
+        }
         let transfer_size = match DmaTransferSize::from_beats(words) {
             Some(size) => size,
             None => return Err(DmaStartError { error: DmaError::TransferTooLarge, driver: self, channel, src, dst }),
         };
         let bytes = words * core::mem::size_of::<u32>();
+
+        #[cfg(feature = "chip-ws63")]
+        if !cache_line_destination(dst_ptr as usize, bytes) {
+            return Err(DmaStartError { error: DmaError::InvalidCacheRange, driver: self, channel, src, dst });
+        }
 
         self.enable_controller();
 
@@ -679,20 +704,21 @@ impl<'d> DmaDriver<'d, Dma0> {
         let ch = channel.logical;
         self.configure_channel_raw(ch, src_ptr as u32, dst_ptr as u32, transfer_size, &cfg);
 
-        Ok(Transfer { driver: self, channel, src, dst, dst_addr: dst_ptr as usize, bytes })
+        Ok(Transfer { driver: ManuallyDrop::new(self), channel: ManuallyDrop::new(channel),
+            src: ManuallyDrop::new(src), dst: ManuallyDrop::new(dst), dst_addr: dst_ptr as usize, bytes })
     }
 }
 
 /// An in-flight DMA transfer that **owns the driver and both buffers**. Reclaim them
-/// with [`wait`](Self::wait); dropping the guard early aborts the channel (so the DMA
-/// stops touching the buffers before they are freed). Owning the buffers is what makes
-/// a use-after-free of an active DMA region unrepresentable in safe code.
+/// with [`wait`](Self::wait); dropping early attempts to abort and retains resources.
+/// A static buffer bound addresses forgotten borrowed stack buffers, but bounded
+/// cancellation and noncoherent cache-line ownership remain unverified.
 #[instability::unstable]
 pub struct Transfer<'d, SRC, DST> {
-    driver: DmaDriver<'d, Dma0>,
-    channel: DmaChannel,
-    src: SRC,
-    dst: DST,
+    driver: ManuallyDrop<DmaDriver<'d, Dma0>>,
+    channel: ManuallyDrop<DmaChannel>,
+    src: ManuallyDrop<SRC>,
+    dst: ManuallyDrop<DST>,
     // Only read by the chip-ws63 cache maintenance in `wait()`; BS2X DMA is coherent
     // here, so these are unused there.
     #[cfg_attr(not(feature = "chip-ws63"), allow(dead_code))]
@@ -719,11 +745,9 @@ impl<'d, SRC, DST> Transfer<'d, SRC, DST> {
     /// lines, and return the driver + both buffers. Consumes the guard, so no abort
     /// `Drop` runs.
     ///
-    /// On `DMA_WAIT_LOOPS` exhaustion (a wedged channel — rare for mem-to-mem, which
-    /// always self-completes) the channel is **quiesced** (halt → drain `active` →
-    /// disable) *before* the buffers are handed back, so the DMA engine is provably
-    /// stopped before the buffers can be freed. A wedged transfer is reported as
-    /// [`DmaError::Timeout`] with the driver, channel token, and buffers returned.
+    /// On `DMA_WAIT_LOOPS` exhaustion, halt, bounded active polling and disable
+    /// are attempted, but the driver, channel and buffers remain retained in the
+    /// timeout error. The active poll can expire, so DMA bus drain is not established.
     pub fn wait(self) -> DmaWaitResult<'d, SRC, DST> {
         // Skip the abort-on-drop: the transfer is completing normally.
         let mut this = ManuallyDrop::new(self);
@@ -741,7 +765,21 @@ impl<'d, SRC, DST> Transfer<'d, SRC, DST> {
         let ch = this.channel.logical;
         let timed_out = this.driver.channel_enabled_raw(ch);
         if timed_out {
-            quiesce_channel(&mut this.driver, ch);
+            let observation = quiesce_channel(&mut this.driver, ch);
+            // SAFETY: the outer guard is ManuallyDrop; each owner is read exactly
+            // once and deliberately retained without invalidating the destination.
+            return unsafe {
+                Err(DmaWaitError {
+                    error: DmaError::Timeout,
+                    observation,
+                    driver: core::ptr::read(&this.driver),
+                    channel: core::ptr::read(&this.channel),
+                    src: core::ptr::read(&this.src),
+                    dst: core::ptr::read(&this.dst),
+                    dst_addr: this.dst_addr,
+                    bytes: this.bytes,
+                })
+            };
         }
         // Drop the stale destination cache lines so the CPU re-reads what DMA wrote.
         #[cfg(feature = "chip-ws63")]
@@ -751,15 +789,11 @@ impl<'d, SRC, DST> Transfer<'d, SRC, DST> {
         // SAFETY: `this` is ManuallyDrop (its Drop never runs) and each field is read
         // exactly once, so there is no double-read or double-drop.
         unsafe {
-            let driver = core::ptr::read(&this.driver);
-            let channel = core::ptr::read(&this.channel);
-            let src = core::ptr::read(&this.src);
-            let dst = core::ptr::read(&this.dst);
-            if timed_out {
-                Err(DmaWaitError { error: DmaError::Timeout, driver, channel, src, dst })
-            } else {
-                Ok((driver, channel, src, dst))
-            }
+            let driver = ManuallyDrop::into_inner(core::ptr::read(&this.driver));
+            let channel = ManuallyDrop::into_inner(core::ptr::read(&this.channel));
+            let src = ManuallyDrop::into_inner(core::ptr::read(&this.src));
+            let dst = ManuallyDrop::into_inner(core::ptr::read(&this.dst));
+            Ok((driver, channel, src, dst))
         }
     }
 }
@@ -792,19 +826,30 @@ impl<'d, SRC, DST> DmaStartError<'d, SRC, DST> {
     }
 }
 
-/// Resources returned when a started DMA transfer times out while waiting.
+/// Resources retained when a started DMA transfer times out. Dropping the error
+/// intentionally retains all resources, including the channel reservation.
+///
+/// ```compile_fail
+/// use hisi_hal::dma::DmaWaitError;
+/// fn recover(e: DmaWaitError<'static, (), ()>) { let _ = e.into_parts(); }
+/// ```
 #[instability::unstable]
 pub struct DmaWaitError<'d, SRC, DST> {
     error: DmaError,
-    driver: DmaDriver<'d, Dma0>,
-    channel: DmaChannel,
-    src: SRC,
-    dst: DST,
+    observation: StopObservation,
+    driver: ManuallyDrop<DmaDriver<'d, Dma0>>,
+    channel: ManuallyDrop<DmaChannel>,
+    src: ManuallyDrop<SRC>,
+    dst: ManuallyDrop<DST>,
+    #[cfg_attr(not(feature = "chip-ws63"), allow(dead_code))]
+    dst_addr: usize,
+    #[cfg_attr(not(feature = "chip-ws63"), allow(dead_code))]
+    bytes: usize,
 }
 
 impl<SRC, DST> core::fmt::Debug for DmaWaitError<'_, SRC, DST> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("DmaWaitError").field("error", &self.error).finish_non_exhaustive()
+        f.debug_struct("DmaWaitError").field("error", &self.error).field("observation", &self.observation).finish_non_exhaustive()
     }
 }
 
@@ -814,20 +859,37 @@ impl<'d, SRC, DST> DmaWaitError<'d, SRC, DST> {
         self.error
     }
 
-    /// Recover the driver, claimed channel, and buffers after the channel has been
-    /// quiesced and the destination cache maintenance has run.
-    pub fn into_parts(self) -> (DmaError, DmaDriver<'d, Dma0>, DmaChannel, SRC, DST) {
-        (self.error, self.driver, self.channel, self.src, self.dst)
+    /// Status observed before disable; this is not proof of bus drain.
+    pub const fn stop_observation(&self) -> StopObservation {
+        self.observation
+    }
+
+    /// Recover retained resources and invalidate the destination after external
+    /// verification. No channel reset or additional hardware check is performed.
+    ///
+    /// # Safety
+    /// Independently prove that the channel, old peripheral requests and every
+    /// bus transaction have stopped and cannot restart until reconfiguration.
+    /// Prove destination cache-line exclusivity and perform any required bus or
+    /// CPU synchronization. The timeout, active bit and channel disable alone do
+    /// not establish these facts. Until then none of the buffers may be accessed.
+    pub unsafe fn into_parts(self) -> (DmaError, DmaDriver<'d, Dma0>, DmaChannel, SRC, DST) {
+        #[cfg(feature = "chip-ws63")]
+        unsafe { crate::cache::invalidate_range(self.dst_addr, self.bytes) };
+        (self.error, ManuallyDrop::into_inner(self.driver), ManuallyDrop::into_inner(self.channel),
+            ManuallyDrop::into_inner(self.src), ManuallyDrop::into_inner(self.dst))
     }
 }
 
 impl<SRC, DST> Drop for Transfer<'_, SRC, DST> {
-    /// Abort the channel so the engine stops reading/writing the owned buffers before
-    /// they are dropped — the use-after-free guard for an early-dropped transfer.
+    /// Attempt to stop the channel and retain all resources. Bounded polling
+    /// does not prove the engine has stopped accessing them; there is no recovery
+    /// handle after early drop.
     ///
     /// Uses `quiesce_channel`: halt, then drain the `active` (FIFO/bus) bit, then
     /// clear `ch_enable` — clearing `ch_enable` mid-burst (the old behaviour) could
-    /// let an outstanding bus write land after the buffer is freed.
+    /// let an outstanding bus write land after the buffer is freed. This sequence
+    /// has not established that all outstanding bus writes have drained.
     fn drop(&mut self) {
         quiesce_channel(&mut self.driver, self.channel.logical);
     }
@@ -835,25 +897,48 @@ impl<SRC, DST> Drop for Transfer<'_, SRC, DST> {
 
 // ── Channel teardown helpers (cancel-then-quiesce) ───────────────────────────
 
-/// Halt a DMA channel, drain its in-flight beats (the `active`/FIFO-busy bit), then
-/// clear `ch_enable`. This is the DesignWare quiesce sequence — clearing `ch_enable`
-/// mid-burst (the original `Drop`) could let an outstanding bus write land after the
-/// owned buffer is freed, a use-after-free window on the non-coherent core. The poll
-/// is bounded by `DMA_WAIT_LOOPS`.
-///
-/// Factored as a free function over `&mut DmaDriver` so both the mem-to-mem
-/// [`Transfer`] and the peripheral [`PeripheralTransfer`] share one teardown path.
-fn quiesce_channel<T: DmaInstance>(driver: &mut DmaDriver<'_, T>, channel: u8) {
-    driver.halt_channel_raw(channel);
-    let mut n = DMA_WAIT_LOOPS;
-    while driver.channel_active_raw(channel) {
-        if n == 0 {
-            break;
+/// Active-bit observation from a bounded stop attempt. Neither variant proves
+/// that posted transactions have reached their destination.
+#[instability::unstable]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum StopObservation {
+    /// The active status bit was observed clear before disabling the channel.
+    ActiveClear,
+    /// The active status bit stayed set through the finite poll budget.
+    ActiveDeadline,
+}
+
+trait StopRegisters {
+    fn halt(&mut self);
+    fn active(&mut self) -> bool;
+    fn disable(&mut self);
+}
+
+fn observe_stop(io: &mut impl StopRegisters, mut remaining: u32) -> StopObservation {
+    io.halt();
+    let result = loop {
+        if !io.active() {
+            break StopObservation::ActiveClear;
         }
-        n -= 1;
+        if remaining == 0 {
+            break StopObservation::ActiveDeadline;
+        }
+        remaining -= 1;
         core::hint::spin_loop();
+    };
+    io.disable();
+    result
+}
+
+fn quiesce_channel<T: DmaInstance>(driver: &mut DmaDriver<'_, T>, channel: u8) -> StopObservation {
+    struct ChannelStop<'a, 'd, T: DmaInstance> { driver: &'a mut DmaDriver<'d, T>, channel: u8 }
+    impl<T: DmaInstance> StopRegisters for ChannelStop<'_, '_, T> {
+        fn halt(&mut self) { self.driver.halt_channel_raw(self.channel); }
+        fn active(&mut self) -> bool { self.driver.channel_active_raw(self.channel) }
+        fn disable(&mut self) { self.driver.disable_channel_raw(self.channel); }
     }
-    driver.disable_channel_raw(channel);
+    observe_stop(&mut ChannelStop { driver, channel }, DMA_WAIT_LOOPS)
 }
 
 /// Cancel-then-quiesce for a peripheral-paced transfer: clear the peripheral's
@@ -864,7 +949,7 @@ fn quiesce_channel<T: DmaInstance>(driver: &mut DmaDriver<'_, T>, channel: u8) {
 #[cfg(feature = "chip-ws63")]
 fn cancel_then_quiesce(peri_dis: &mut PeriDmaCtl, driver: &mut DmaDriver<'_, Dma0>, channel: u8) {
     peri_dis.disable();
-    quiesce_channel(driver, channel);
+    let _ = quiesce_channel(driver, channel);
 }
 
 // ── Peripheral-paced DMA (hisi-hal#6 / 0.5.1) ──────────────────────────
@@ -874,14 +959,19 @@ fn cancel_then_quiesce(peri_dis: &mut PeriDmaCtl, driver: &mut DmaDriver<'_, Dma
 #[non_exhaustive]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum DmaError {
+    /// A zero-length buffer cannot start a DMA transfer.
+    EmptyBuffer,
     /// The buffer exceeded the 12-bit `trans_size` field (4095 beats per single-block
     /// transfer). The caller must chunk it. (Multi-block LLI chunking is a follow-up;
     /// for 0.5.1 a single-block cap is correct and not a silent truncation.)
     TransferTooLarge,
+    /// A byte-buffer entry point cannot safely express halfword beats.
+    UnsupportedFrame,
+    /// Destination invalidation would affect a partial cache line or wrap.
+    InvalidCacheRange,
     /// The channel did not auto-clear its enable bit within `DMA_WAIT_LOOPS` (a
     /// wedged transfer — e.g. a peripheral whose DMA-enable was never set, or a
-    /// handshake mismatch). The guard quiesced the channel before returning, so the
-    /// buffer is safe, but the transfer did not complete.
+    /// handshake mismatch). Cancellation was attempted, but drain is not proven.
     Timeout,
 }
 
@@ -1049,8 +1139,26 @@ impl DmaDriver<'_, Dma0> {
         }
     }
 
-    /// Enable a claimed DMA channel.
-    pub fn enable_channel(&mut self, channel: &DmaChannel) {
+    /// Enable a claimed DMA channel using its existing hardware configuration.
+    ///
+    /// A channel token alone does not validate the addresses left in its registers:
+    /// a completed transfer may already have returned or released its buffers.
+    ///
+    /// # Safety
+    ///
+    /// The caller must establish that the entire existing channel configuration,
+    /// including linked descriptors, addresses, request routing and transfer size,
+    /// is valid and authorized, and that all memory and peripheral resources remain
+    /// exclusively owned and DMA-accessible until outstanding bus accesses drain.
+    /// Cache maintenance and cross-core coordination are also the caller's duty.
+    ///
+    /// ```compile_fail
+    /// # use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver};
+    /// fn restart(driver: &mut DmaDriver<'_, Dma0>, channel: &DmaChannel) {
+    ///     driver.enable_channel(channel);
+    /// }
+    /// ```
+    pub unsafe fn enable_channel(&mut self, channel: &DmaChannel) {
         self.enable_channel_raw(channel.logical);
     }
 
@@ -1074,8 +1182,21 @@ impl DmaDriver<'_, Dma0> {
         self.halt_channel_raw(channel.logical);
     }
 
-    /// Resume a halted claimed DMA channel.
-    pub fn resume_channel(&mut self, channel: &DmaChannel) {
+    /// Resume a halted claimed DMA channel using its existing configuration.
+    ///
+    /// # Safety
+    ///
+    /// The same resource, address, routing, cache and drain requirements as
+    /// [`Self::enable_channel`] must hold for the resumed operation. In
+    /// particular, halting or disabling a channel does not establish bus drain.
+    ///
+    /// ```compile_fail
+    /// # use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver};
+    /// fn resume(driver: &mut DmaDriver<'_, Dma0>, channel: &DmaChannel) {
+    ///     driver.resume_channel(channel);
+    /// }
+    /// ```
+    pub unsafe fn resume_channel(&mut self, channel: &DmaChannel) {
         self.resume_channel_raw(channel.logical);
     }
 
@@ -1110,7 +1231,9 @@ impl<'d> DmaDriver<'d, Dma0> {
     ///
     /// Cleans the source cache before launch (non-coherent core) and pins
     /// `peri_data_addr` (a peripheral data register) as the fixed destination. The
-    /// beat width is `frame` (not the mem-to-mem `Word = u32`). The peripheral-side
+    /// Byte buffers currently support only [`DmaFrame::Byte`]. Halfword frames
+    /// require a separately typed buffer API and are rejected before DMA access.
+    /// The peripheral-side
     /// DMA-enable is the caller's responsibility until P1's `with_dma` wires it
     /// (vendor order: configure channel → write watermark → clean → start → set
     /// peripheral DMA-enable); this guard tears it down on `Drop` via `peri_dis`.
@@ -1118,8 +1241,28 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// Returns [`DmaError::TransferTooLarge`] if `src` exceeds 4095 beats (a
     /// single-block DMA `trans_size` cap — chunk the buffer). On `Err` the driver,
     /// channel, and buffer are dropped (the channel claim is released).
+    /// An empty buffer returns [`DmaError::EmptyBuffer`] without starting DMA.
+    ///
+    /// # Safety
+    /// The caller must exclusively own the actual peripheral and establish that
+    /// its data-register address, request ID, direction and teardown handle
+    /// refer to the same device. The selected register must permit this access.
+    /// Keep the buffer, peripheral and complete affected cache lines valid and
+    /// inaccessible to other actors until independent evidence proves all DMA
+    /// activity and bus writes stopped, including after timeout or guard drop.
+    /// A bounded `active` poll and the channel-disable bit do not supply that
+    /// proof. Ensure DMA and CPU cache visibility throughout the transfer.
+    ///
+    /// ```compile_fail
+    /// # use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver, DmaFrame, DmaPeripheral, PeriDmaCtl};
+    /// fn unchecked(driver: DmaDriver<'static, Dma0>, channel: DmaChannel,
+    ///              data: &'static [u8], ctl: PeriDmaCtl) {
+    ///     let _ = driver.start_mem_to_peripheral(channel, data, 0,
+    ///         DmaPeripheral::Spi0Tx, DmaFrame::Byte, ctl);
+    /// }
+    /// ```
     #[instability::unstable]
-    pub fn start_mem_to_peripheral<SRC>(
+    pub unsafe fn start_mem_to_peripheral<SRC>(
         mut self,
         channel: DmaChannel,
         src: SRC,
@@ -1129,12 +1272,18 @@ impl<'d> DmaDriver<'d, Dma0> {
         peri_dis: PeriDmaCtl,
     ) -> Result<PeripheralTransfer<'d, SRC>, DmaError>
     where
-        SRC: ReadBuffer<Word = u8>,
+        SRC: ReadBuffer<Word = u8> + 'static,
     {
+        if frame != DmaFrame::Byte {
+            return Err(DmaError::UnsupportedFrame);
+        }
         let ch = channel.logical;
         // SAFETY: `src` is moved into the returned guard and held until wait(), so the
         // pointer stays valid for the whole transfer.
         let (src_ptr, beats) = unsafe { src.read_buffer() };
+        if beats == 0 {
+            return Err(DmaError::EmptyBuffer);
+        }
         if beats > 0xFFF {
             // Drop the consumed driver (ZST), channel (releases claim), and buffer.
             drop(channel);
@@ -1153,9 +1302,9 @@ impl<'d> DmaDriver<'d, Dma0> {
         self.configure_channel_raw(ch, src_ptr as u32, peri_data_addr as u32, size, &cfg);
 
         Ok(PeripheralTransfer {
-            driver: self,
-            channel,
-            buf: src,
+            driver: ManuallyDrop::new(self),
+            channel: ManuallyDrop::new(channel),
+            buf: ManuallyDrop::new(src),
             dir: DmaDirection::Tx,
             mem_addr: src_ptr as usize,
             bytes,
@@ -1167,8 +1316,18 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// returning a [`PeripheralTransfer`] guard. The destination cache is invalidated
     /// on [`wait`](PeripheralTransfer::wait) AFTER completion. See
     /// [`start_mem_to_peripheral`] for the lifetime / cap / teardown contract.
+    /// Halfword frames are rejected before DMA access because this API takes a
+    /// byte buffer and its length cannot be interpreted as a halfword count.
+    /// The destination address and transfer length must each be a nonzero
+    /// multiple of [`DMA_ALIGN`] so invalidation covers only owned cache lines.
+    /// An empty buffer returns [`DmaError::EmptyBuffer`] without starting DMA.
+    ///
+    /// # Safety
+    /// The TX method's peripheral address, request routing, exclusivity,
+    /// buffer lifetime, independent drain and cache visibility requirements
+    /// also apply. Destination cache lines must be exclusively held until drain.
     #[instability::unstable]
-    pub fn start_peripheral_to_mem<DST>(
+    pub unsafe fn start_peripheral_to_mem<DST>(
         mut self,
         channel: DmaChannel,
         mut dst: DST,
@@ -1178,16 +1337,26 @@ impl<'d> DmaDriver<'d, Dma0> {
         peri_dis: PeriDmaCtl,
     ) -> Result<PeripheralTransfer<'d, DST>, DmaError>
     where
-        DST: WriteBuffer<Word = u8>,
+        DST: WriteBuffer<Word = u8> + 'static,
     {
+        if frame != DmaFrame::Byte {
+            return Err(DmaError::UnsupportedFrame);
+        }
         let ch = channel.logical;
         // SAFETY: `dst` is moved into the returned guard and held until wait().
         let (dst_ptr, beats) = unsafe { dst.write_buffer() };
+        if beats == 0 {
+            return Err(DmaError::EmptyBuffer);
+        }
         if beats > 0xFFF {
             drop(channel);
             return Err(DmaError::TransferTooLarge);
         }
         let bytes = beats;
+
+        if !cache_line_destination(dst_ptr as usize, bytes) {
+            return Err(DmaError::InvalidCacheRange);
+        }
 
         // No clean before launch — the CPU hasn't written the RX destination; the DMA
         // will. invalidate_range runs on wait() AFTER completion. The peripheral DATA
@@ -1197,9 +1366,9 @@ impl<'d> DmaDriver<'d, Dma0> {
         self.configure_channel_raw(ch, peri_data_addr as u32, dst_ptr as u32, size, &cfg);
 
         Ok(PeripheralTransfer {
-            driver: self,
-            channel,
-            buf: dst,
+            driver: ManuallyDrop::new(self),
+            channel: ManuallyDrop::new(channel),
+            buf: ManuallyDrop::new(dst),
             dir: DmaDirection::Rx,
             mem_addr: dst_ptr as usize,
             bytes,
@@ -1210,19 +1379,18 @@ impl<'d> DmaDriver<'d, Dma0> {
 
 /// An in-flight peripheral-paced DMA transfer that **owns the driver, the channel
 /// token, and the single memory buffer**. Reclaim them with
-/// [`wait`](Self::wait); dropping the guard early runs cancel-then-quiesce: clear
-/// the peripheral DMA-enable, halt, drain `active`, disable — so neither the channel
-/// nor the peripheral keeps touching the buffer before it is freed.
+/// [`wait`](Self::wait); dropping the guard early attempts cancellation by clearing
+/// peripheral DMA-enable, halting, polling `active` and disabling the channel.
 ///
-/// Owning the buffer (by value, via `embedded_dma`) is what makes a use-after-free of
-/// an active DMA region unrepresentable in safe code: the buffer cannot be touched,
-/// moved, or freed while the DMA reads/writes it.
+/// The buffer must be owned or statically borrowed. This prevents a forgotten
+/// guard from leaving a borrowed stack allocation accessible to DMA, but does not
+/// prove cancellation drain, peripheral address validity or cache-line ownership.
 #[cfg(feature = "chip-ws63")]
 #[instability::unstable]
 pub struct PeripheralTransfer<'d, BUF> {
-    driver: DmaDriver<'d, Dma0>,
-    channel: DmaChannel,
-    buf: BUF,
+    driver: ManuallyDrop<DmaDriver<'d, Dma0>>,
+    channel: ManuallyDrop<DmaChannel>,
+    buf: ManuallyDrop<BUF>,
     dir: DmaDirection,
     mem_addr: usize,
     bytes: usize,
@@ -1243,9 +1411,9 @@ impl<'d, BUF> PeripheralTransfer<'d, BUF> {
     ///
     /// On `DMA_WAIT_LOOPS` exhaustion the channel is cancel-then-quiesced first, then
     /// [`Err(DmaError::Timeout)`](DmaError::Timeout) is returned (the driver, channel,
-    /// and buffer are dropped — the channel claim is released, the buffer is safe
-    /// because the engine was stopped). A wedged transfer is therefore *observable*,
-    /// not silently "done" — the UAF-on-timeout hole the mem-to-mem guard had.
+    /// and buffer are deliberately retained. This legacy API has no recovery
+    /// handle for a timed-out peripheral transfer. Bounded polling does not
+    /// establish that outstanding bus accesses have stopped.
     #[instability::unstable]
     pub fn wait(self) -> Result<(DmaDriver<'d, Dma0>, DmaChannel, BUF), DmaError> {
         // Skip the abort-on-drop: the transfer is completing normally.
@@ -1261,22 +1429,12 @@ impl<'d, BUF> PeripheralTransfer<'d, BUF> {
         }
 
         if this.driver.channel_enabled_raw(ch) {
-            // Timed out: cancel-then-quiesce so the engine is stopped before any
-            // buffer/cache teardown, then invalidate the RX destination (the DMA may
-            // have written partial data) before the buffer drops. The two `&mut`
-            // field borrows are sequential (not simultaneous) so they reborrow
-            // `&mut *this` one at a time.
+            // Attempt cancellation without invalidating or releasing buffers;
+            // the bounded poll does not prove that the DMA bus is drained.
             this.peri_dis.disable();
             quiesce_channel(&mut this.driver, ch);
-            if this.dir == DmaDirection::Rx {
-                unsafe {
-                    crate::cache::invalidate_range(this.mem_addr, this.bytes);
-                }
-            }
-            // Drop driver + channel (its Drop releases the claim bitmask) + buf.
-            // `into_inner` unwraps the ManuallyDrop so the inner values actually drop
-            // (otherwise the channel claim would leak on the timeout path).
-            drop(ManuallyDrop::into_inner(this));
+            // Keep the ManuallyDrop guard and all its resources retained; do not
+            // invalidate a destination that might still receive posted writes.
             return Err(DmaError::Timeout);
         }
 
@@ -1292,9 +1450,9 @@ impl<'d, BUF> PeripheralTransfer<'d, BUF> {
         // SAFETY: `this` is ManuallyDrop (its Drop never runs) and each field is read
         // exactly once, so there is no double-read or double-drop.
         unsafe {
-            let driver = core::ptr::read(&this.driver);
-            let channel = core::ptr::read(&this.channel);
-            let buf = core::ptr::read(&this.buf);
+            let driver = ManuallyDrop::into_inner(core::ptr::read(&this.driver));
+            let channel = ManuallyDrop::into_inner(core::ptr::read(&this.channel));
+            let buf = ManuallyDrop::into_inner(core::ptr::read(&this.buf));
             Ok((driver, channel, buf))
         }
     }
@@ -1303,8 +1461,8 @@ impl<'d, BUF> PeripheralTransfer<'d, BUF> {
 #[cfg(feature = "chip-ws63")]
 impl<BUF> Drop for PeripheralTransfer<'_, BUF> {
     /// Cancel-then-quiesce: clear the peripheral DMA-enable, halt, drain `active`,
-    /// disable — so neither the channel nor the peripheral keeps asserting requests
-    /// against a buffer that's about to be freed.
+    /// disable and retain the driver, channel and buffer. The bounded poll does
+    /// not establish DMA bus drain; no recovery handle remains after early drop.
     fn drop(&mut self) {
         cancel_then_quiesce(&mut self.peri_dis, &mut self.driver, self.channel.logical);
     }
@@ -1338,6 +1496,104 @@ mod tests {
     use super::*;
 
     #[test]
+    fn timed_out_resources_are_retained_until_explicit_unsafe_recovery() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        struct Counted(Arc<AtomicUsize>);
+        impl Drop for Counted {
+            fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); }
+        }
+        fn retained(drops: &Arc<AtomicUsize>) -> DmaWaitError<'static, Counted, Counted> {
+            DmaWaitError {
+                error: DmaError::Timeout,
+                observation: StopObservation::ActiveDeadline,
+                driver: ManuallyDrop::new(DmaDriver::new_for_test()),
+                channel: ManuallyDrop::new(DmaChannel { logical: 0 }),
+                src: ManuallyDrop::new(Counted(drops.clone())),
+                dst: ManuallyDrop::new(Counted(drops.clone())),
+                dst_addr: 0,
+                bytes: 0,
+            }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let error = retained(&drops);
+        assert_eq!(error.stop_observation(), StopObservation::ActiveDeadline);
+        drop(error);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        // SAFETY: host-only synthetic resources were never given to a DMA engine.
+        let (_, _, _, src, dst) = unsafe { retained(&drops).into_parts() };
+        drop((src, dst));
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn stop_observation_reports_both_outcomes_and_always_disables() {
+        struct Mock { active: std::vec::Vec<bool>, events: std::vec::Vec<&'static str> }
+        impl StopRegisters for Mock {
+            fn halt(&mut self) { self.events.push("halt"); }
+            fn active(&mut self) -> bool { self.events.push("active"); self.active.remove(0) }
+            fn disable(&mut self) { self.events.push("disable"); }
+        }
+        let mut idle = Mock { active: std::vec![true, false], events: std::vec![] };
+        assert_eq!(observe_stop(&mut idle, 2), StopObservation::ActiveClear);
+        assert_eq!(idle.events, ["halt", "active", "active", "disable"]);
+        let mut stuck = Mock { active: std::vec![true, true, true], events: std::vec![] };
+        assert_eq!(observe_stop(&mut stuck, 2), StopObservation::ActiveDeadline);
+        assert_eq!(stuck.events, ["halt", "active", "active", "active", "disable"]);
+    }
+
+    #[test]
+    fn early_drop_retains_memory_buffers_even_when_stop_panics() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        struct Counted(Arc<AtomicUsize>);
+        impl Drop for Counted {
+            fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let result = std::panic::catch_unwind(|| {
+            let guard = Transfer {
+                driver: ManuallyDrop::new(DmaDriver::new_for_test()),
+                // Invalid channel forces a panic before host MMIO, testing unwind.
+                channel: ManuallyDrop::new(DmaChannel { logical: 4 }),
+                src: ManuallyDrop::new(Counted(drops.clone())),
+                dst: ManuallyDrop::new(Counted(drops.clone())),
+                dst_addr: 0,
+                bytes: 0,
+            };
+            drop(guard);
+        });
+        assert!(result.is_err());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(feature = "chip-ws63")]
+    #[test]
+    fn early_drop_retains_peripheral_buffer_even_when_stop_panics() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        struct Counted(Arc<AtomicUsize>);
+        impl Drop for Counted {
+            fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let result = std::panic::catch_unwind(|| {
+            let guard = PeripheralTransfer {
+                driver: ManuallyDrop::new(DmaDriver::new_for_test()),
+                channel: ManuallyDrop::new(DmaChannel { logical: 4 }),
+                buf: ManuallyDrop::new(Counted(drops.clone())),
+                dir: DmaDirection::Tx,
+                mem_addr: 0,
+                bytes: 0,
+                peri_dis: PeriDmaCtl::new(0, PeriKind::Uart, DmaDirection::Tx),
+            };
+            drop(guard);
+        });
+        assert!(result.is_err());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+    }
+
+    // These request identities exist only in the WS63 peripheral-DMA backend.
+    // Keep the generic controller/configuration tests below enabled for BS2X.
+    #[cfg(feature = "chip-ws63")]
+    #[test]
     fn test_dma_direction_tx_rx_distinct() {
         // TX and RX directions must map to different peripheral IDs
         assert_ne!(DmaDirection::Tx as u8, DmaDirection::Rx as u8);
@@ -1346,6 +1602,7 @@ mod tests {
     // The request IDs below are the HAL_DMA_HANDSHAKING_* indices from fbb_ws63
     // dma_porting.h (the single source of truth) — NOT a fabricated 0..11 run.
 
+    #[cfg(feature = "chip-ws63")]
     #[test]
     fn test_dma_peripheral_spi_handshaking_ids() {
         // SPI_MS0 = 7/8, SPI_MS1 = 13/14.
@@ -1357,6 +1614,7 @@ mod tests {
         assert_eq!(DmaPeripheral::Spi1Rx.request_id(), 14);
     }
 
+    #[cfg(feature = "chip-ws63")]
     #[test]
     fn test_dma_peripheral_uart_handshaking_ids() {
         // UART0=UART_L (1/2), UART1=UART_H0 (3/4), UART2=UART_H1 (5/6).
@@ -1368,12 +1626,14 @@ mod tests {
         assert_eq!(DmaPeripheral::Uart2Rx.request_id(), 6);
     }
 
+    #[cfg(feature = "chip-ws63")]
     #[test]
     fn test_dma_peripheral_i2s_handshaking_ids() {
         assert_eq!(DmaPeripheral::I2sTx.request_id(), 11);
         assert_eq!(DmaPeripheral::I2sRx.request_id(), 12);
     }
 
+    #[cfg(feature = "chip-ws63")]
     #[test]
     fn test_dma_peripheral_ids_fit_4bit_field() {
         // src/dst_peripheral is a 4-bit channel-config field.
@@ -1389,6 +1649,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "chip-ws63")]
     #[test]
     fn test_dma_channel_config_peripheral_wiring() {
         // mem_to_peripheral / peripheral_to_mem set flow control + the handshaking
@@ -1511,8 +1772,92 @@ mod tests {
         // A 'static buffer (the 'static driver requires SRC: 'static).
         static BUF: [u8; 5000] = [0; 5000]; // 5000 > 0xFFF (4095)
         let peri_dis = PeriDmaCtl::new(0x4402_0000, PeriKind::Spi, DmaDirection::Tx);
-        let r = dma.start_mem_to_peripheral(ch, &BUF[..], 0x4402_0060, DmaPeripheral::Spi0Tx, DmaFrame::Byte, peri_dis);
+        // SAFETY: the oversized transfer is rejected before any hardware access.
+        let r = unsafe { dma.start_mem_to_peripheral(ch, &BUF[..], 0x4402_0060, DmaPeripheral::Spi0Tx, DmaFrame::Byte, peri_dis) };
         assert!(matches!(r, Err(DmaError::TransferTooLarge)), "expected TransferTooLarge");
+    }
+
+    #[cfg(feature = "chip-ws63")]
+    #[test]
+    fn byte_buffer_rejects_halfword_in_both_directions_before_mmio() {
+        static SRC: [u8; 8] = [0x5a; 8];
+        let dst: &'static mut [u8] = std::boxed::Box::leak(std::boxed::Box::new([0xa5; 8]));
+        let dma: DmaDriver<'static, Dma0> = DmaDriver::new_for_test();
+        // SAFETY: unsupported frames are rejected before any hardware access.
+        let tx = unsafe { dma.start_mem_to_peripheral(
+            DmaChannel { logical: 0 }, &SRC[..], 0, DmaPeripheral::Spi0Tx, DmaFrame::HalfWord,
+            PeriDmaCtl::new(0, PeriKind::Spi, DmaDirection::Tx),
+        ) };
+        assert!(matches!(tx, Err(DmaError::UnsupportedFrame)));
+        let dma: DmaDriver<'static, Dma0> = DmaDriver::new_for_test();
+        // SAFETY: unsupported frames are rejected before any hardware access.
+        let rx = unsafe { dma.start_peripheral_to_mem(
+            DmaChannel { logical: 0 }, dst, 0, DmaPeripheral::Spi0Rx, DmaFrame::HalfWord,
+            PeriDmaCtl::new(0, PeriKind::Spi, DmaDirection::Rx),
+        ) };
+        assert!(matches!(rx, Err(DmaError::UnsupportedFrame)));
+    }
+
+    #[cfg(feature = "chip-ws63")]
+    #[test]
+    fn cache_destination_rejects_partial_empty_and_wrapping_ranges() {
+        assert!(cache_line_destination(0x1000, 32));
+        assert!(cache_line_destination(0x1000, 64));
+        assert!(!cache_line_destination(0x1001, 32));
+        assert!(!cache_line_destination(0x1000, 31));
+        assert!(!cache_line_destination(0x1000, 0));
+        assert!(!cache_line_destination(usize::MAX & !(DMA_ALIGN - 1), 32));
+    }
+
+    #[test]
+    fn empty_memory_transfer_is_rejected_before_dma_mmio() {
+        static SRC: [u32; 0] = [];
+        let dst: &'static mut [u32] = std::boxed::Box::leak(std::boxed::Box::new([0; 1]));
+        let dma: DmaDriver<'static, Dma0> = DmaDriver::new_for_test();
+        let result = dma.start_mem_to_mem(DmaChannel { logical: 0 }, &SRC[..], dst);
+        assert!(matches!(result, Err(ref e) if e.error() == DmaError::EmptyBuffer));
+    }
+
+    #[cfg(feature = "chip-ws63")]
+    #[test]
+    fn empty_peripheral_transfers_are_rejected_before_dma_mmio() {
+        static SRC: [u8; 0] = [];
+        let dma: DmaDriver<'static, Dma0> = DmaDriver::new_for_test();
+        // SAFETY: the zero-length transfer is rejected before any hardware access.
+        let tx = unsafe { dma.start_mem_to_peripheral(
+            DmaChannel { logical: 0 }, &SRC[..], 0, DmaPeripheral::Spi0Tx, DmaFrame::Byte,
+            PeriDmaCtl::new(0, PeriKind::Spi, DmaDirection::Tx),
+        ) };
+        assert!(matches!(tx, Err(DmaError::EmptyBuffer)));
+        let dst: &'static mut [u8] = std::boxed::Box::leak(std::boxed::Box::new([]));
+        let dma: DmaDriver<'static, Dma0> = DmaDriver::new_for_test();
+        // SAFETY: the zero-length transfer is rejected before any hardware access.
+        let rx = unsafe { dma.start_peripheral_to_mem(
+            DmaChannel { logical: 0 }, dst, 0, DmaPeripheral::Spi0Rx, DmaFrame::Byte,
+            PeriDmaCtl::new(0, PeriKind::Spi, DmaDirection::Rx),
+        ) };
+        assert!(matches!(rx, Err(DmaError::EmptyBuffer)));
+    }
+
+    #[cfg(feature = "chip-ws63")]
+    #[test]
+    fn unaligned_destination_is_rejected_before_dma_mmio() {
+        #[repr(align(32))]
+        struct Aligned([u32; 16]);
+        static SRC: [u32; 8] = [0; 8];
+        let dst = std::boxed::Box::leak(std::boxed::Box::new(Aligned([0; 16])));
+        let dma: DmaDriver<'static, Dma0> = DmaDriver::new_for_test();
+        let result = dma.start_mem_to_mem(DmaChannel { logical: 0 }, &SRC[..], &mut dst.0[1..9]);
+        assert!(matches!(result, Err(ref e) if e.error() == DmaError::InvalidCacheRange));
+
+        let dst: &'static mut [u8] = std::boxed::Box::leak(std::boxed::Box::new([0; 1]));
+        let dma: DmaDriver<'static, Dma0> = DmaDriver::new_for_test();
+        // SAFETY: a one-byte destination is rejected before any hardware access.
+        let result = unsafe { dma.start_peripheral_to_mem(
+            DmaChannel { logical: 0 }, dst, 0, DmaPeripheral::Spi0Rx, DmaFrame::Byte,
+            PeriDmaCtl::new(0, PeriKind::Spi, DmaDirection::Rx),
+        ) };
+        assert!(matches!(result, Err(DmaError::InvalidCacheRange)));
     }
 
     #[cfg(feature = "chip-ws63")]

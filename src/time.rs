@@ -3,6 +3,7 @@
 //! Provides `Instant`, `Duration`, and `Rate` types for timing operations.
 //! Uses the TCXO 64-bit counter as the hardware time source.
 
+#[cfg(not(feature = "chip-ws53"))]
 use crate::peripherals::Tcxo;
 
 /// A measurement of a monotonically non-decreasing clock.
@@ -13,6 +14,7 @@ pub struct Instant(u64);
 impl Instant {
     /// Returns an instant corresponding to "now".
     #[instability::unstable]
+    #[cfg(not(feature = "chip-ws53"))]
     pub fn now() -> Self {
         // SAFETY: TCXO PAC pointer is a valid physical MMIO address (0x4400_04C0)
         let tcxo = unsafe { &*Tcxo::ptr() };
@@ -32,6 +34,7 @@ impl Instant {
 
     /// Returns the amount of time elapsed since this instant.
     #[instability::unstable]
+    #[cfg(not(feature = "chip-ws53"))]
     pub fn elapsed(&self) -> Duration {
         Instant::now().checked_duration_since(*self).unwrap_or(Duration::from_micros(0))
     }

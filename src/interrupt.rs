@@ -366,6 +366,57 @@ pub fn is_enabled(irq: Interrupt) -> bool {
     }
 }
 
+/// Temporarily suspend one WS53 local source, preserving priority and pending.
+/// Unlike `disable`/`enable`, this does not consume an event or reset priority.
+/// The closure runs outside the short controller-bookkeeping critical sections.
+///
+/// # Safety
+/// The caller exclusively owns this source's enable state for the closure's
+/// duration. Its handler must already be installed if the source is enabled.
+/// No other core/NMI or closure code may change that source's enable state.
+#[cfg(feature = "chip-ws53")]
+pub(crate) unsafe fn with_source_suspended<R>(irq: Interrupt, f: impl FnOnce() -> R) -> R {
+    struct Restore {
+        irq: Interrupt,
+        enabled: bool,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            critical_section::with(|_| unsafe { set_source_enabled(self.irq, self.enabled) });
+        }
+    }
+    unsafe fn set_source_enabled(irq: Interrupt, enabled: bool) {
+        let n = irq_num(irq);
+        unsafe {
+            // Order peripheral accesses before restoring delivery, and prevent
+            // subsequent accesses from moving before source suspension.
+            #[cfg(target_arch = "riscv32")]
+            core::arch::asm!("fence", options(nostack));
+            if (SYS_VECTOR_CNT..LOCAL_IRQ_VECTOR_CNT).contains(&n) {
+                if enabled {
+                    csr_set!("mie", 1u32 << n);
+                } else {
+                    csr_clear!("mie", 1u32 << n);
+                }
+            } else if n >= LOCAL_IRQ_VECTOR_CNT {
+                let bit = (n - LOCAL_IRQ_VECTOR_CNT) % LOCIEN_IRQ_NUM;
+                let reg = (n - LOCAL_IRQ_VECTOR_CNT) / LOCIEN_IRQ_NUM;
+                locien_write(reg, 1u32 << bit, enabled);
+            }
+            #[cfg(target_arch = "riscv32")]
+            core::arch::asm!("fence", options(nostack));
+        }
+    }
+    let restore = critical_section::with(|_| {
+        let enabled = is_enabled(irq);
+        unsafe { set_source_enabled(irq, false) };
+        Restore { irq, enabled }
+    });
+    let result = f();
+    drop(restore);
+    result
+}
+
 // --- priority / threshold ---------------------------------------------------
 
 /// Set a local interrupt's 4-bit priority (`LOCIPRI`). Applies to IRQ >= 26;
@@ -570,6 +621,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "chip-ws63")]
     fn irq_num_matches_enum_discriminant() {
         // irq_num is just the repr discriminant — TIMER_INT0 = 26, GPIO_INT0 = 33.
         assert_eq!(irq_num(Interrupt::TIMER_INT0), 26);
@@ -589,6 +641,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "chip-ws63")]
     fn timer_int0_is_mie_tier() {
         // IRQ 26 sits in the standard mie window [26, 32), not the custom LOCIEN tier.
         let n = irq_num(Interrupt::TIMER_INT0);
@@ -597,6 +650,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "chip-ws63")]
     fn gpio_ints_are_locien_tier() {
         // GPIO IRQs 33..=35 are >= 32, so they use the custom LOCIEN CSRs.
         for irq in [Interrupt::GPIO_INT0, Interrupt::GPIO_INT1, Interrupt::GPIO_INT2] {
@@ -626,6 +680,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "chip-ws63")]
     fn locien_split_for_gpio_ints() {
         // GPIO_INT0=33 → LOCIEN0 bit 1; GPIO_INT2=35 → LOCIEN0 bit 3.
         assert_eq!(locien_reg_bit(irq_num(Interrupt::GPIO_INT0)), (0, 1));
@@ -642,6 +697,7 @@ mod tests {
     }
 
     // Re-derive the LOCIPRI register/field-shift split used by set_priority/priority.
+    #[cfg(feature = "chip-ws63")]
     fn locipri_reg_shift(n: u16) -> (u16, u16) {
         let order = (n - SYS_VECTOR_CNT) % LOCIPRI_IRQ_NUM;
         let reg = (n - SYS_VECTOR_CNT) / LOCIPRI_IRQ_NUM;
@@ -653,6 +709,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "chip-ws63")]
     fn locipri_split_for_known_irqs() {
         // SYS_VECTOR_CNT (26) is the first priority-configurable IRQ: LOCIPRI0 field 0.
         assert_eq!(locipri_reg_shift(SYS_VECTOR_CNT), (0, 0));

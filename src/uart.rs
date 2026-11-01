@@ -9,7 +9,44 @@
 //! (issue #15/#10).
 
 use crate::peripherals::{Uart0, Uart1, Uart2};
+
+#[cfg(feature = "chip-ws53")]
+#[path = "uart_ws53.rs"]
+mod ws53;
 use core::marker::PhantomData;
+
+// Compute a divisor in units of 1/64. Callers select the supported sampling
+// mode and supply nonzero baud. u64 covers every u32 clock and baud input.
+const fn divisor_in_sixty_fourths(clock: u32, baud: u32, sampling: u8) -> u64 {
+    (clock as u64) * 64 / ((baud as u64) * (sampling as u64))
+}
+#[cfg(feature = "chip-ws53")]
+pub use ws53::{ReceiveError, ReceiveInterrupt};
+#[cfg(feature = "chip-ws53")]
+#[path = "uart_ws53/line.rs"]
+mod ws53_line;
+#[cfg(feature = "chip-ws53")]
+pub use ws53_line::{LineConfig, StopDuration};
+#[cfg(feature = "chip-ws53")]
+#[path = "uart_ws53/reset.rs"]
+mod ws53_reset;
+#[cfg(feature = "chip-ws53")]
+pub use ws53_reset::{ResetError, ResettableUart, SignalPath};
+#[cfg(feature = "chip-ws53")]
+#[path = "uart_ws53/h0.rs"]
+mod ws53_h0;
+#[cfg(feature = "chip-ws53")]
+pub use ws53_h0::{H0InitError, H0InitFailure};
+#[cfg(feature = "chip-ws53")]
+#[path = "uart_ws53/route.rs"]
+mod ws53_route;
+#[cfg(feature = "chip-ws53")]
+pub use ws53_route::InterruptRouteError;
+#[cfg(all(feature = "chip-ws53", feature = "async"))]
+#[path = "uart_ws53/asynch.rs"]
+mod ws53_async;
+#[cfg(all(feature = "chip-ws53", feature = "async"))]
+pub use ws53_async::{AsyncBindError, AsyncReceiver, AsyncTransmitter, TransmitInterrupt};
 
 mod sealed {
     pub trait UartInstanceSealed {}
@@ -107,7 +144,8 @@ pub enum StopBits {
 /// realisable baud is `[~153, 10 000 000]`. `try_new` rejects anything outside that
 /// instead of the old silent low-clamp (`baud < min_baud → min_baud`). Note: a
 /// [`UartClock::Boot`] (the 24/40 MHz flashboot console clock) shifts the realisable
-/// range down — keep boot-console firmware at ordinary baud rates such as 115200.
+/// range down. For a clock-profile-aware check use the `try_new_uartN`
+/// constructors; the existing `new_uartN` constructors remain unchecked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct BaudRate(u32);
@@ -123,7 +161,7 @@ impl BaudRate {
             return None;
         }
         // div = (UART_CLOCK_HZ * 4 / baud) >> 6  (the fixed-point form configure uses).
-        let div = ((crate::soc::chip::UART_CLOCK_HZ as u64) * 4 / (baud as u64)) >> 6;
+        let div = divisor_in_sixty_fourths(crate::soc::chip::UART_CLOCK_HZ, baud, 16) >> 6;
         if div < 1 || div > 0xFFFF {
             return None;
         }
@@ -146,6 +184,7 @@ pub enum UartClock {
     Boot,
 }
 
+#[cfg(not(feature = "chip-ws53"))]
 impl UartClock {
     fn hz(self) -> u32 {
         match self {
@@ -160,7 +199,7 @@ fn boot_uart_clock_hz() -> u32 {
     crate::soc::chip::uart_boot_clock_hz()
 }
 
-#[cfg(not(feature = "chip-ws63"))]
+#[cfg(feature = "chip-bs21")]
 fn boot_uart_clock_hz() -> u32 {
     crate::soc::chip::UART_CLOCK_HZ
 }
@@ -180,6 +219,35 @@ pub struct Config {
     pub clock: UartClock,
 }
 
+/// The selected clock cannot represent the requested baud with a nonzero
+/// 16-bit integer divisor. The clock value is the HAL's selected clock profile,
+/// not a measurement of the physical clock tree.
+#[cfg(not(feature = "chip-ws53"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct BaudClockError {
+    /// Selected clock frequency in hertz.
+    pub clock_hz: u32,
+    /// Requested baud rate.
+    pub baud: u32,
+}
+
+#[cfg(not(feature = "chip-ws53"))]
+fn checked_configure<T, F: FnOnce(&Config, u32)>(
+    token: T,
+    config: &Config,
+    clock_hz: u32,
+    configure: F,
+) -> Result<T, (T, BaudClockError)> {
+    let baud = config.baudrate.baud();
+    let integer = divisor_in_sixty_fourths(clock_hz, baud, 16) >> 6;
+    if !(1..=u16::MAX as u64).contains(&integer) {
+        return Err((token, BaudClockError { clock_hz, baud }));
+    }
+    configure(config, clock_hz);
+    Ok(token)
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -195,6 +263,8 @@ impl Default for Config {
 /// UART driver instance, generic over the UART peripheral type `T` (Uart0/1/2).
 pub struct Uart<'d, T> {
     _peripheral: PhantomData<&'d T>,
+    #[cfg(feature = "chip-ws53")]
+    pending_receive_error: core::cell::Cell<Option<ReceiveError>>,
 }
 
 #[allow(dead_code)]
@@ -217,40 +287,78 @@ fn uart_regs(port: UartPort) -> &'static crate::soc::pac::uart0::RegisterBlock {
 }
 
 #[allow(dead_code)]
+#[cfg(not(feature = "chip-ws53"))]
 fn write_fifo_blocking_levels(r: &crate::soc::pac::uart0::RegisterBlock) {
     r.fifo_ctl().write(|w| w.fifo_en().set_bit().tx_empty_trig().empty().rx_empty_trig().char1());
 }
 
+#[cfg(not(feature = "chip-ws53"))]
 fn write_fifo_dma_levels(r: &crate::soc::pac::uart0::RegisterBlock) {
     r.fifo_ctl().write(|w| w.fifo_en().set_bit().tx_empty_trig().chars2().rx_empty_trig().quarter());
 }
 
+#[cfg(not(feature = "chip-ws53"))]
 impl<'d> Uart<'d, Uart0<'d>> {
-    /// Create and configure a UART0 driver from the peripheral token and config.
+    /// Create and configure UART0. The selected clock's divisor is not checked;
+    /// use [`Self::try_new_uart0`] when the requested baud may not fit it.
     pub fn new_uart0(_uart: Uart0<'d>, config: Config) -> Self {
         configure_uart(UartPort::Uart0, &config);
         Self { _peripheral: PhantomData }
     }
+
+    /// Validate the selected clock profile before configuring UART0. On error,
+    /// returns the untouched peripheral token and performs no UART register writes.
+    /// The selected profile must still match the actual stable hardware clock.
+    pub fn try_new_uart0(uart: Uart0<'d>, config: Config) -> Result<Self, (Uart0<'d>, BaudClockError)> {
+        let clock = config.clock.hz();
+        let _uart = checked_configure(uart, &config, clock, |c, hz| configure_uart_at(UartPort::Uart0, c, Some(hz)))?;
+        Ok(Self { _peripheral: PhantomData })
+    }
 }
 
+#[cfg(not(feature = "chip-ws53"))]
 impl<'d> Uart<'d, Uart1<'d>> {
-    /// Create and configure a UART1 driver from the peripheral token and config.
+    /// Create and configure UART1. The selected clock's divisor is not checked;
+    /// use [`Self::try_new_uart1`] when the requested baud may not fit it.
     pub fn new_uart1(_uart: Uart1<'d>, config: Config) -> Self {
         configure_uart(UartPort::Uart1, &config);
         Self { _peripheral: PhantomData }
     }
+
+    /// Checked UART1 constructor; see [`Uart::try_new_uart0`].
+    pub fn try_new_uart1(uart: Uart1<'d>, config: Config) -> Result<Self, (Uart1<'d>, BaudClockError)> {
+        let clock = config.clock.hz();
+        let _uart = checked_configure(uart, &config, clock, |c, hz| configure_uart_at(UartPort::Uart1, c, Some(hz)))?;
+        Ok(Self { _peripheral: PhantomData })
+    }
 }
 
+#[cfg(not(feature = "chip-ws53"))]
 impl<'d> Uart<'d, Uart2<'d>> {
-    /// Create and configure a UART2 driver from the peripheral token and config.
+    /// Create and configure UART2. The selected clock's divisor is not checked;
+    /// use [`Self::try_new_uart2`] when the requested baud may not fit it.
     #[instability::unstable]
     pub fn new_uart2(_uart: Uart2<'d>, config: Config) -> Self {
         configure_uart(UartPort::Uart2, &config);
         Self { _peripheral: PhantomData }
     }
+
+    /// Checked UART2 constructor; see [`Uart::try_new_uart0`].
+    #[instability::unstable]
+    pub fn try_new_uart2(uart: Uart2<'d>, config: Config) -> Result<Self, (Uart2<'d>, BaudClockError)> {
+        let clock = config.clock.hz();
+        let _uart = checked_configure(uart, &config, clock, |c, hz| configure_uart_at(UartPort::Uart2, c, Some(hz)))?;
+        Ok(Self { _peripheral: PhantomData })
+    }
 }
 
+#[cfg(not(feature = "chip-ws53"))]
 fn configure_uart(port: UartPort, config: &Config) {
+    configure_uart_at(port, config, None);
+}
+
+#[cfg(not(feature = "chip-ws53"))]
+fn configure_uart_at(port: UartPort, config: &Config, selected_clock: Option<u32>) {
     let r = uart_regs(port);
 
     // Enable divisor-latch access only while programming the baud divider.
@@ -262,13 +370,13 @@ fn configure_uart(port: UartPort, config: &Config) {
     // PLL base, so no runtime clamp is needed (and `baud()` is never 0 → no div0).
     // `UartClock::Boot` selects the pre-`clock_init` flashboot console clock; the
     // default `Pll` keeps the normal 160 MHz PLL base.
-    let pclk = config.clock.hz();
+    let pclk = selected_clock.unwrap_or_else(|| config.clock.hz());
     let baudrate = config.baudrate.baud();
     // div = pclk / (16 * baud), as fixed-point with 6 fractional bits (div_fra ∈
     // [0,63] sixty-fourths). Dropping the fraction (old div_fra=0) is fine at high
     // clocks but a significant baud error at the TCXO base — flashboot itself
     // programs a non-zero div_fra. (issue #15)
-    let div64 = ((pclk as u64) * 4 / (baudrate as u64)) as u32; // = div * 64
+    let div64 = divisor_in_sixty_fourths(pclk, baudrate, 16) as u32; // = div * 64
     let div = div64 >> 6;
     let div_fra = div64 & 0x3F;
     let div_l = div & 0xFF;
@@ -307,31 +415,41 @@ fn configure_uart(port: UartPort, config: &Config) {
 }
 
 impl<T: UartInstance> Uart<'_, T> {
+    /// Try to write one byte without waiting for external progress.
+    pub fn try_write_byte(&self, byte: u8) -> nb::Result<(), core::convert::Infallible> {
+        let r = uart_regs(T::PORT);
+        if r.fifo_status().read().tx_fifo_full().bit_is_set() {
+            return Err(nb::Error::WouldBlock);
+        }
+        write_data(r, byte);
+        Ok(())
+    }
+
     /// Write one byte, blocking while this UART's TX FIFO is full.
     pub fn write_byte(&self, byte: u8) {
         let r = uart_regs(T::PORT);
         while r.fifo_status().read().tx_fifo_full().bit_is_set() {}
-        r.data().write(|w| unsafe { w.data().bits(byte) });
+        write_data(r, byte);
     }
 
     /// Read one byte, or `None` if this UART's RX FIFO is empty.
+    #[cfg(not(feature = "chip-ws53"))]
     pub fn read_byte(&self) -> Option<u8> {
         let r = uart_regs(T::PORT);
-        // `LINE_STATUS.data_available` is the UART's authoritative receive-data
-        // indication. On WS63 UART0, `RX_FIFO_CNT` can remain zero while the FIFO
-        // is full (`RX_FIFO_WRITE` reports level 64), so gating on the count loses
-        // every host-to-target byte. The FIFO-empty bit is also unsuitable for a
-        // single-byte pop on this IP revision.
+        // WS63's receive-count alias differs from the WS53 SDK layout.
+        // Preserve the existing silicon-qualified path for older chips.
         if r.line_status().read().data_available().bit_is_clear() { None } else { Some(r.data().read().bits() as u8) }
     }
 
     /// Block until this UART's TX FIFO is fully drained.
+    #[cfg(not(feature = "chip-ws53"))]
     pub fn flush_tx(&self) {
         let r = uart_regs(T::PORT);
         while !r.fifo_status().read().tx_fifo_empty().bit_is_set() {}
     }
 
     /// Non-blocking check: returns true if TX FIFO is fully drained.
+    #[cfg(not(feature = "chip-ws53"))]
     pub fn tx_flushed(&self) -> bool {
         uart_regs(T::PORT).fifo_status().read().tx_fifo_empty().bit_is_set()
     }
@@ -351,6 +469,32 @@ impl<T: UartInstance> Uart<'_, T> {
     #[instability::unstable]
     pub unsafe fn register_block(&self) -> &'static crate::soc::pac::uart0::RegisterBlock {
         uart_regs(T::PORT)
+    }
+}
+
+fn write_data(r: &crate::soc::pac::uart0::RegisterBlock, byte: u8) {
+    #[cfg(not(feature = "chip-ws53"))]
+    r.data().write(|w| unsafe { w.data().bits(byte) });
+    #[cfg(feature = "chip-ws53")]
+    // The SDK uses a complete word write; no read or assumed reset is needed.
+    unsafe {
+        r.tx().write_with_zero(|w| w.data().bits(byte))
+    };
+}
+
+#[cfg(feature = "chip-ws53")]
+impl<'d, T: UartInstance> Uart<'d, T> {
+    /// Attach to a UART configured by the boot environment without changing
+    /// its divider, FIFO, pad mux or clock selection.
+    ///
+    /// # Safety
+    /// The UART must be running in ordinary data mode (divisor latch disabled)
+    /// with its clock and signal path (pads or internal loopback) configured,
+    /// and have no other CPU/DMA/IRQ user. Internal loopback does not establish
+    /// a physical pad route or qualify external pin operation.
+    /// This bootstrap constructor is not a full WS53 clock/pin configuration API.
+    pub unsafe fn from_configured(_uart: T) -> Self {
+        Self { _peripheral: PhantomData, pending_receive_error: core::cell::Cell::new(None) }
     }
 }
 
@@ -542,6 +686,7 @@ pub enum UartDmaError {
     Timeout,
 }
 
+#[cfg(not(feature = "chip-ws53"))]
 impl embedded_io::ErrorType for Uart<'_, Uart0<'_>> {
     type Error = core::convert::Infallible;
 }
@@ -557,6 +702,7 @@ impl embedded_io::Write for Uart<'_, Uart0<'_>> {
         Ok(())
     }
 }
+#[cfg(not(feature = "chip-ws53"))]
 impl embedded_io::Read for Uart<'_, Uart0<'_>> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         let mut n = 0;
@@ -573,6 +719,7 @@ impl embedded_io::Read for Uart<'_, Uart0<'_>> {
 }
 
 // UART1 embedded-io traits
+#[cfg(not(feature = "chip-ws53"))]
 impl embedded_io::ErrorType for Uart<'_, Uart1<'_>> {
     type Error = core::convert::Infallible;
 }
@@ -588,6 +735,7 @@ impl embedded_io::Write for Uart<'_, Uart1<'_>> {
         Ok(())
     }
 }
+#[cfg(not(feature = "chip-ws53"))]
 impl embedded_io::Read for Uart<'_, Uart1<'_>> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         let mut n = 0;
@@ -604,6 +752,7 @@ impl embedded_io::Read for Uart<'_, Uart1<'_>> {
 }
 
 // UART2 embedded-io traits
+#[cfg(not(feature = "chip-ws53"))]
 impl embedded_io::ErrorType for Uart<'_, Uart2<'_>> {
     type Error = core::convert::Infallible;
 }
@@ -619,6 +768,7 @@ impl embedded_io::Write for Uart<'_, Uart2<'_>> {
         Ok(())
     }
 }
+#[cfg(not(feature = "chip-ws53"))]
 impl embedded_io::Read for Uart<'_, Uart2<'_>> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         let mut n = 0;
@@ -636,6 +786,7 @@ impl embedded_io::Read for Uart<'_, Uart2<'_>> {
 
 // ── embedded-hal-nb serial traits ──────────────────────────────
 
+#[cfg(not(feature = "chip-ws53"))]
 macro_rules! impl_nb_serial {
     ($uart:ty) => {
         impl embedded_hal_nb::serial::ErrorType for Uart<'_, $uart> {
@@ -661,8 +812,11 @@ macro_rules! impl_nb_serial {
     };
 }
 
+#[cfg(not(feature = "chip-ws53"))]
 impl_nb_serial!(Uart0<'_>);
+#[cfg(not(feature = "chip-ws53"))]
 impl_nb_serial!(Uart1<'_>);
+#[cfg(not(feature = "chip-ws53"))]
 impl_nb_serial!(Uart2<'_>);
 
 // ── Async UART (embedded-io-async) ──────────────────────────────────────────
@@ -671,6 +825,7 @@ mod asynch_impl {
     use super::{Uart, UartPort, uart_regs};
     use crate::asynch::IrqSignal;
     use crate::peripherals::{Uart0, Uart1, Uart2};
+
     use core::cell::Cell;
     use core::future::Future;
     use core::pin::Pin;
@@ -770,7 +925,49 @@ mod tests {
     use super::*;
     use crate::soc::chip::UART_CLOCK_HZ;
 
-    // Re-derivation of the pure baud-rate math that `configure_uart` inlines.
+    #[cfg(not(feature = "chip-ws53"))]
+    #[test]
+    fn checked_clock_rejects_invalid_divisors_without_configuring_or_losing_token() {
+        let calls = core::cell::Cell::new(0);
+        let mut config = Config { baudrate: BaudRate::try_new(1_000_000).unwrap(), ..Config::default() };
+        let rejected = checked_configure(42u8, &config, 8_000_000, |_, _| calls.set(calls.get() + 1));
+        assert_eq!(rejected, Err((42, BaudClockError { clock_hz: 8_000_000, baud: 1_000_000 })));
+        assert_eq!(calls.get(), 0);
+        assert_eq!(
+            checked_configure(42u8, &config, 16_000_000, |_, clock| {
+                assert_eq!(clock, 16_000_000);
+                calls.set(calls.get() + 1);
+            }),
+            Ok(42)
+        );
+        assert_eq!(calls.get(), 1);
+        config.baudrate = BaudRate::try_new(200).unwrap();
+        let max_clock = 200 * 16 * u32::from(u16::MAX);
+        assert_eq!(checked_configure(42u8, &config, max_clock, |_, _| calls.set(calls.get() + 1)), Ok(42));
+        assert_eq!(
+            checked_configure(42u8, &config, max_clock + 3200, |_, _| calls.set(calls.get() + 1)),
+            Err((42, BaudClockError { clock_hz: max_clock + 3200, baud: 200 }))
+        );
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[cfg(feature = "chip-ws63")]
+    #[test]
+    fn boot_clock_high_baud_rejection_covers_both_crystal_profiles() {
+        let fast = Config { baudrate: BaudRate::try_new(3_000_000).unwrap(), ..Config::default() };
+        for clock in [24_000_000, 40_000_000] {
+            assert_eq!(
+                checked_configure((), &fast, clock, |_, _| panic!("invalid baud programmed")),
+                Err(((), BaudClockError { clock_hz: clock, baud: 3_000_000 }))
+            );
+        }
+        let normal = Config::default();
+        for clock in [24_000_000, 40_000_000] {
+            assert_eq!(checked_configure((), &normal, clock, |_, selected| assert_eq!(selected, clock)), Ok(()));
+        }
+    }
+
+    // Exercise the same pure baud-rate math used by `configure_uart`.
     // div = pclk / (16 * baud) carried as 6-bit fixed point:
     //   div64 = pclk * 4 / baud  (= div * 64), div = div64 >> 6, frac = div64 & 0x3F.
     // The 16-bit divider gives a minimum representable baud of pclk/(16*65535)+1 —
@@ -781,7 +978,7 @@ mod tests {
     /// Returns (div_l, div_h, div_fra) exactly as `configure_uart` would program them
     /// for a valid (already-validated) baud — no clamp, mirroring the tightened path.
     fn baud_regs(baud: u32) -> (u16, u16, u16) {
-        let div64 = ((UART_CLOCK_HZ as u64) * 4 / (baud as u64)) as u32;
+        let div64 = divisor_in_sixty_fourths(UART_CLOCK_HZ, baud, 16) as u32;
         let div = div64 >> 6;
         let div_fra = (div64 & 0x3F) as u16;
         let div_l = (div & 0xFF) as u16;
@@ -822,6 +1019,7 @@ mod tests {
     /// 115200 baud at 160 MHz: div = 160e6/(16*115200) ≈ 86.8 → div=86, frac≈51.
     /// div * 64 = 5546 → div=86 (0x56), frac=42 (5546 & 0x3F). Verify exact bytes.
     #[test]
+    #[cfg(feature = "chip-ws63")]
     fn baud_115200_known_divisor() {
         // div64 = 160_000_000 * 4 / 115200 = 5555 (integer truncation).
         let div64 = (UART_CLOCK_HZ as u64) * 4 / 115200;
@@ -930,8 +1128,7 @@ mod tests {
     /// Two stop bits sets bit 7; one stop bit leaves it clear.
     #[test]
     fn stop_bits_encoding() {
-        let mut c = Config::default();
-        c.stop_bits = StopBits::One;
+        let mut c = Config { stop_bits: StopBits::One, ..Config::default() };
         assert_eq!(build_ctl(&c) & (1 << 7), 0);
         c.stop_bits = StopBits::Two;
         assert_eq!(build_ctl(&c) & (1 << 7), 1 << 7);
@@ -964,14 +1161,14 @@ mod tests {
 
 #[cfg(all(test, not(target_arch = "riscv32")))]
 mod proptests {
-    use super::BaudRate;
+    use super::{BaudRate, divisor_in_sixty_fourths};
     use crate::soc::chip::UART_CLOCK_HZ;
     use proptest::prelude::*;
 
     /// The register triple `configure_uart` programs for a (valid) baud — no clamp,
     /// mirroring the tightened path where `BaudRate` already guaranteed the range.
     fn baud_regs(baud: u32) -> (u16, u16, u16) {
-        let div64 = ((UART_CLOCK_HZ as u64) * 4 / (baud as u64)) as u32;
+        let div64 = divisor_in_sixty_fourths(UART_CLOCK_HZ, baud, 16) as u32;
         let div = div64 >> 6;
         let div_fra = (div64 & 0x3F) as u16;
         let div_l = (div & 0xFF) as u16;
@@ -980,6 +1177,14 @@ mod proptests {
     }
 
     proptest! {
+        #[test]
+        fn divisor_matches_independent_quotient_remainder(clock in any::<u32>(), baud in 1u32..=u32::MAX, eight in any::<bool>()) {
+            let sampling = if eight { 8u8 } else { 16u8 };
+            let denominator = u64::from(baud) * u64::from(sampling);
+            let clock = u64::from(clock);
+            let expected = (clock / denominator) * 64 + (clock % denominator) * 64 / denominator;
+            prop_assert_eq!(divisor_in_sixty_fourths(clock as u32, baud, sampling), expected);
+        }
         /// Fuzz: `BaudRate::try_new` never panics for any u32 baud (incl. 0) — it
         /// returns `None` out of range instead of clamping or dividing by zero.
         #[test]

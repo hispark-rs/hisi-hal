@@ -1,0 +1,12 @@
+Unlock
+Eoi
+Enable(false)
+Configure
+Load(8000)
+Restart
+Eoi
+Enable(false)
+Mode(Reset)
+Eoi
+Enable(true)
+Restart

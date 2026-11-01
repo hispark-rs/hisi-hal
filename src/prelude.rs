@@ -11,14 +11,19 @@ pub use nb::block;
 
 pub use crate::Peripherals;
 #[cfg(feature = "unstable")]
+#[cfg(not(feature = "chip-ws53"))]
 pub use crate::delay::Delay;
 #[cfg(feature = "unstable")]
+#[cfg(not(feature = "chip-ws53"))]
 pub use crate::gpio::InterruptTrigger;
+#[cfg(not(feature = "chip-ws53"))]
 pub use crate::gpio::{AnyPin, Flex, GpioBank, Input, InputConfig, Output, OutputConfig, Pull};
 pub use crate::interrupt::{Interrupt, Priority, Threshold};
+#[cfg(not(feature = "chip-ws53"))]
 pub use crate::tcxo::TcxoDriver;
 pub use crate::time::{Duration, Instant, Rate};
 #[cfg(feature = "unstable")]
+#[cfg(not(feature = "chip-ws53"))]
 pub use crate::timer::{OneShotTimer, PeriodicTimer};
 pub use crate::timer::{TimerChannel, TimerDriver};
 pub use crate::uart::{Uart, UartClock, UartPort};

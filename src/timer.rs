@@ -76,31 +76,19 @@ pub enum TimerError {
 /// 32-bit load/period register would overflow (the old silent `u32::MAX` clamp).
 #[allow(dead_code)]
 const fn try_ticks_for_us(us: u32) -> Result<u32, TimerError> {
-    let ticks = TIMER_CLOCK_HZ as u64 * us as u64 / 1_000_000;
-    if ticks > u32::MAX as u64 { Err(TimerError::TicksOverflow) } else { Ok(ticks as u32) }
+    match crate::timer_math::checked_ticks(us, TIMER_CLOCK_HZ, core::num::NonZeroU32::new(1_000_000).unwrap()) {
+        Some(ticks) => Ok(ticks),
+        None => Err(TimerError::TicksOverflow),
+    }
 }
 
 /// Convert milliseconds to timer ticks, or [`TimerError::TicksOverflow`] on overflow.
 #[allow(dead_code)]
 const fn try_ticks_for_ms(ms: u32) -> Result<u32, TimerError> {
-    let ticks = TIMER_CLOCK_HZ as u64 * ms as u64 / 1_000;
-    if ticks > u32::MAX as u64 { Err(TimerError::TicksOverflow) } else { Ok(ticks as u32) }
-}
-
-/// Saturating µs→ticks for the blocking `embedded_hal::delay::DelayNs` impl, whose
-/// trait contract has no error channel — a clamped (rather than rejected) delay is
-/// the accepted embedded-hal semantics for an out-of-range request.
-#[allow(dead_code)]
-const fn ticks_for_us_saturating(us: u32) -> u32 {
-    let ticks = TIMER_CLOCK_HZ as u64 * us as u64 / 1_000_000;
-    if ticks > u32::MAX as u64 { u32::MAX } else { ticks as u32 }
-}
-
-/// Saturating ms→ticks for the blocking `DelayNs` impl (see [`ticks_for_us_saturating`]).
-#[allow(dead_code)]
-const fn ticks_for_ms_saturating(ms: u32) -> u32 {
-    let ticks = TIMER_CLOCK_HZ as u64 * ms as u64 / 1_000;
-    if ticks > u32::MAX as u64 { u32::MAX } else { ticks as u32 }
+    match crate::timer_math::checked_ticks(ms, TIMER_CLOCK_HZ, core::num::NonZeroU32::new(1_000).unwrap()) {
+        Some(ticks) => Ok(ticks),
+        None => Err(TimerError::TicksOverflow),
+    }
 }
 
 /// Timer driver managing 3 independent timer channels.
@@ -366,6 +354,10 @@ impl OneShotTimer<'_> {
     ///
     /// `count` is in timer clock ticks (TCXO = 24MHz → 1 tick ≈ 41.7ns).
     pub fn start(&mut self, count: u32) {
+        // A previous expiry must not satisfy this new wait. Stop first so an
+        // old period cannot expire between acknowledging it and reprogramming.
+        self.driver.disable(self.channel);
+        self.driver.clear_interrupt(self.channel);
         self.driver.configure(self.channel, TimerMode::OneShot, count);
         self.driver.enable(self.channel);
     }
@@ -424,25 +416,25 @@ impl OneShotTimer<'_> {
 
 impl embedded_hal::delay::DelayNs for OneShotTimer<'_> {
     fn delay_ns(&mut self, ns: u32) {
-        let ticks64 = (TIMER_CLOCK_HZ as u64 * ns as u64) / 1_000_000_000;
-        let ticks = if ticks64 > u32::MAX as u64 { u32::MAX } else { ticks64 as u32 };
-        if ticks > 0 {
-            self.start(ticks);
-            self.wait();
-        }
+        self.delay_periods(ns, 1_000_000_000);
     }
 
     fn delay_us(&mut self, us: u32) {
-        // The DelayNs trait has no error channel; clamp (don't reject) per
-        // embedded-hal blocking-delay semantics. The fallible inherent
-        // `start_micros` is the typed path for callers that want rejection.
-        self.start(ticks_for_us_saturating(us));
-        self.wait();
+        self.delay_periods(us, 1_000_000);
     }
 
     fn delay_ms(&mut self, ms: u32) {
-        self.start(ticks_for_ms_saturating(ms));
-        self.wait();
+        self.delay_periods(ms, 1_000);
+    }
+}
+
+impl OneShotTimer<'_> {
+    fn delay_periods(&mut self, value: u32, units_per_second: u32) {
+        let mut remaining = crate::timer_math::delay_ticks(value, TIMER_CLOCK_HZ, units_per_second);
+        while let Some(chunk) = crate::timer_math::next_delay_chunk(&mut remaining) {
+            self.start(chunk);
+            self.wait();
+        }
     }
 }
 
