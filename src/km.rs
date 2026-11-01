@@ -98,9 +98,9 @@ mod tests {
         let unlocked: u8 = 0;
         let ree_locked: u8 = 1;
         let tee_locked: u8 = 2;
-        assert_eq!(unlocked != 0, false); // unlocked → not locked
-        assert_eq!(ree_locked != 0, true); // REE locked → locked
-        assert_eq!(tee_locked != 0, true); // TEE locked → locked
+        assert_eq!(unlocked, 0); // unlocked → not locked
+        assert_ne!(ree_locked, 0); // REE locked → locked
+        assert_ne!(tee_locked, 0); // TEE locked → locked
     }
 
     #[test]

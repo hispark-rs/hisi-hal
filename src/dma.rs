@@ -1564,9 +1564,12 @@ mod tests {
             }
         }
         let drops = Arc::new(AtomicUsize::new(0));
-        let error = retained(&drops);
-        assert_eq!(error.stop_observation(), StopObservation::ActiveDeadline);
-        drop(error);
+        {
+            let error = retained(&drops);
+            assert_eq!(error.stop_observation(), StopObservation::ActiveDeadline);
+            // End the error's lifetime normally, including any future Drop impl.
+            // Its ManuallyDrop buffers must not be released by this scope exit.
+        }
         assert_eq!(drops.load(Ordering::SeqCst), 0);
         // SAFETY: host-only synthetic resources were never given to a DMA engine.
         let (_, _, _, src, dst) = unsafe { retained(&drops).into_parts() };
@@ -1936,41 +1939,15 @@ mod tests {
 
 #[cfg(all(test, not(target_arch = "riscv32")))]
 mod proptests {
-    use super::{BurstSize, FlowControl, TransferWidth, physical_channel_index};
+    use super::{BurstSize, DmaChannelConfig, DmaTransferSize, FlowControl, TransferWidth, physical_channel_index};
     use proptest::prelude::*;
 
-    // Re-derive `configure_channel`'s control-word encoder (same masks/shifts as
-    // the driver — pure arithmetic, no MMIO). Mirrors dma.rs lines 244-261.
-    fn control_word(
-        transfer_size: u16,
-        src_burst: BurstSize,
-        dst_burst: BurstSize,
-        src_width: TransferWidth,
-        dst_width: TransferWidth,
-        src_inc: bool,
-        dst_inc: bool,
-        transfer_int: bool,
-    ) -> u32 {
-        let mut control: u32 = 0;
-        control |= (transfer_size as u32) & 0xFFF; // trans_size [0:11]
-        control |= ((src_burst as u32) & 0x07) << 12; // s_bsize [12:14]
-        control |= ((dst_burst as u32) & 0x07) << 15; // d_bsize [15:17]
-        control |= ((src_width as u32) & 0x07) << 18; // s_width [18:20]
-        control |= ((dst_width as u32) & 0x07) << 21; // d_width [21:23]
-        if src_inc {
-            control |= 1 << 26;
-        }
-        if dst_inc {
-            control |= 1 << 27;
-        }
-        if transfer_int {
-            control |= 1 << 31;
-        }
-        control
+    // Invoke the production encoder. Expected field positions below are the
+    // register contract; a second encoder here would only test its own copy.
+    fn control_word(size: u16, config: DmaChannelConfig) -> u32 {
+        config.control_word(DmaTransferSize::from_beats(size as usize).unwrap())
     }
 
-    // Re-derive `configure_channel`'s channel-config-word encoder. Mirrors
-    // dma.rs lines 268-281.
     fn ch_cfg_word(
         src_peripheral: u8,
         dst_peripheral: u8,
@@ -1979,21 +1956,10 @@ mod proptests {
         transfer_int: bool,
         bus_lock: bool,
     ) -> u32 {
-        let mut ch_cfg: u32 = 0;
-        ch_cfg |= 0x01; // chn_en
-        ch_cfg |= ((src_peripheral as u32) & 0x0F) << 1; // s_peripheral [1:4]
-        ch_cfg |= ((dst_peripheral as u32) & 0x0F) << 5; // d_peripheral [5:8]
-        ch_cfg |= ((flow_control as u32) & 0x07) << 9; // flow_ctl [9:11]
-        if error_int {
-            ch_cfg |= 1 << 12; // int_en
-        }
-        if transfer_int {
-            ch_cfg |= 1 << 13; // int_tc
-        }
-        if bus_lock {
-            ch_cfg |= 1 << 14; // lock
-        }
-        ch_cfg
+        DmaChannelConfig {
+            src_peripheral, dst_peripheral, flow_control, error_int, transfer_int, bus_lock,
+            ..DmaChannelConfig::default()
+        }.channel_config_word()
     }
 
     fn burst(v: u8) -> BurstSize {
@@ -2076,26 +2042,36 @@ mod proptests {
         /// Reserved positions [24:25] (masters), [28:30] (prot/reserved) must be 0.
         #[test]
         fn control_word_no_stray_bits(
-            ts in any::<u16>(),
+            ts in 0u16..=0xfff,
             sb in any::<u8>(), db in any::<u8>(),
             sw in any::<u8>(), dw in any::<u8>(),
             si in any::<bool>(), di in any::<bool>(), ti in any::<bool>(),
         ) {
-            let c = control_word(ts, burst(sb), burst(db), width(sw), width(dw), si, di, ti);
+            let c = control_word(ts, DmaChannelConfig {
+                src_burst: burst(sb), dst_burst: burst(db),
+                src_width: width(sw), dst_width: width(dw),
+                src_inc: si, dst_inc: di, transfer_int: ti,
+                ..DmaChannelConfig::default()
+            });
             // Defined bits: [0:11] trans, [12:14] sb, [15:17] db, [18:20] sw,
             // [21:23] dw, 26 s_inc, 27 d_inc, 31 t_int. Everything else is reserved 0.
             const DEFINED: u32 = 0x00FF_FFFF | (1 << 26) | (1 << 27) | (1 << 31);
             prop_assert_eq!(c & !DEFINED, 0, "stray bits in control word {:#010x}", c);
         }
 
-        /// Fuzz: trans_size is a 12-bit field — the encoder truncates a u16 > 0xFFF
-        /// (mask, not overflow). Verify the masked low 12 bits round-trip exactly.
+        /// Typed construction rejects out-of-range sizes; legal values round-trip.
+        /// Zero is representable by this low-level type, even though buffer APIs
+        /// reject empty transfers separately. Do not invent a new constructor rule.
         #[test]
         fn control_word_trans_size_field(ts in any::<u16>()) {
-            let c = control_word(ts, BurstSize::Beats1, BurstSize::Beats1,
-                TransferWidth::Width8, TransferWidth::Width8, false, false, false);
-            prop_assert_eq!(c & 0xFFF, (ts as u32) & 0xFFF);
-            prop_assert!((c & 0xFFF) <= 0xFFF);
+            match DmaTransferSize::from_beats(ts as usize) {
+                Some(size) => {
+                    prop_assert!(ts as usize <= DmaTransferSize::MAX_BEATS);
+                    let c = DmaChannelConfig::default().control_word(size);
+                    prop_assert_eq!(c & 0xFFF, ts as u32);
+                }
+                None => prop_assert!(ts as usize > DmaTransferSize::MAX_BEATS),
+            }
         }
 
         /// Fuzz: every enum field round-trips out of the control word at its shift.
@@ -2104,7 +2080,10 @@ mod proptests {
             sb in 0u8..8, db in 0u8..8, sw in 0u8..3, dw in 0u8..3,
         ) {
             let (sbe, dbe, swe, dwe) = (burst(sb), burst(db), width(sw), width(dw));
-            let c = control_word(0, sbe, dbe, swe, dwe, false, false, false);
+            let c = control_word(0, DmaChannelConfig {
+                src_burst: sbe, dst_burst: dbe, src_width: swe, dst_width: dwe,
+                ..DmaChannelConfig::default()
+            });
             prop_assert_eq!((c >> 12) & 0x07, sbe as u32);
             prop_assert_eq!((c >> 15) & 0x07, dbe as u32);
             prop_assert_eq!((c >> 18) & 0x07, swe as u32);
@@ -2114,8 +2093,10 @@ mod proptests {
         /// Fuzz: each boolean control flag lands in exactly its documented bit.
         #[test]
         fn control_word_flag_bits(si in any::<bool>(), di in any::<bool>(), ti in any::<bool>()) {
-            let c = control_word(0, BurstSize::Beats1, BurstSize::Beats1,
-                TransferWidth::Width8, TransferWidth::Width8, si, di, ti);
+            let c = control_word(0, DmaChannelConfig {
+                src_inc: si, dst_inc: di, transfer_int: ti,
+                ..DmaChannelConfig::default()
+            });
             prop_assert_eq!((c >> 26) & 1 == 1, si);
             prop_assert_eq!((c >> 27) & 1 == 1, di);
             prop_assert_eq!((c >> 31) & 1 == 1, ti);
