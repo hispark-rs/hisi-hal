@@ -126,6 +126,9 @@ unstable_module! {
     #[cfg(feature = "chip-ws63")]
     pub mod software_interrupt;
 }
+#[cfg(all(feature = "async", feature = "unstable", feature = "chip-ws53"))]
+#[path = "gpio/async_wait.rs"]
+mod gpio_async;
 /// TCXO always-on clock/counter driver.
 #[cfg(not(feature = "chip-ws53"))]
 pub mod tcxo;
