@@ -64,6 +64,7 @@ impl<L: Copy + Eq> Signal<L> {
 pub(crate) trait WaitIo {
     type Line: Copy + Eq;
     fn line(&self) -> Self::Line;
+    /// Mask delivery without discarding latched events (including peer pins).
     fn pause(&mut self);
     fn configure(&mut self);
     fn resume(&mut self);

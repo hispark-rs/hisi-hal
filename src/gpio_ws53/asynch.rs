@@ -114,7 +114,7 @@ impl WaitIo for InputWait<'_, '_, '_, '_> {
         self.input.line
     }
     fn pause(&mut self) {
-        unsafe { interrupt::disable(self.line().bank().interrupt()) };
+        unsafe { interrupt::mask(self.line().bank().interrupt()) };
     }
     fn configure(&mut self) {
         self.input.listen(self.trigger);

@@ -55,7 +55,7 @@ impl WaitIo for InputWait<'_, '_> {
         self.input.number()
     }
     fn pause(&mut self) {
-        unsafe { interrupt::disable(bank_irq(bank(self.input))) };
+        unsafe { interrupt::mask(bank_irq(bank(self.input))) };
     }
     fn configure(&mut self) {
         self.input.disable_interrupt();

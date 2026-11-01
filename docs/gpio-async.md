@@ -16,6 +16,11 @@ The resource boundaries remain different:
   enabled captured sources and wakes only their waiters. Cancelling one pin
   preserves other enabled pins and does not clear their bank-wide pending latch.
 
+Temporary GPIO masking uses `interrupt::mask`, which preserves the controller
+pending latch. The historical `interrupt::disable` still masks and acknowledges;
+using it during re-poll or cancelling a shared pin loses a latched peer event.
+Both WS63 peer cancellation and WS53 re-poll-before-ISR are separate model cases.
+
 The legacy WS63 bank-wide completion flag let an unrelated or empty IRQ finish
 a wait, and dropping a pending future left its notification enabled. These
 experimental behaviors are corrected without changing published stable APIs.

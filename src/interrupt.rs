@@ -340,6 +340,22 @@ pub unsafe fn enable(irq: Interrupt) {
 /// See [`enable`]; toggling interrupt masks outside a critical section can race
 /// with a handler that is mid-flight.
 pub unsafe fn disable(irq: Interrupt) {
+    unsafe { mask(irq) };
+    clear_pending(irq);
+}
+
+/// Mask delivery without acknowledging the controller's pending state.
+///
+/// Use this when temporarily serializing a shared source: [`disable`] also
+/// clears pending, which can lose an already latched event. This does not stop
+/// the peripheral, acknowledge its status, change priority, or mask global MIE.
+/// Resume using [`enable`] only after the handler and shared state are ready.
+///
+/// # Safety
+/// As for [`disable`], the caller owns the interrupt route and must exclude
+/// concurrent handlers/configuration. This is not cross-core synchronization.
+#[instability::unstable]
+pub unsafe fn mask(irq: Interrupt) {
     let n = irq_num(irq);
     if (SYS_VECTOR_CNT..LOCAL_IRQ_VECTOR_CNT).contains(&n) {
         unsafe { csr_clear!("mie", 1u32 << n) };
@@ -348,7 +364,6 @@ pub unsafe fn disable(irq: Interrupt) {
         let reg = (n - LOCAL_IRQ_VECTOR_CNT) / LOCIEN_IRQ_NUM;
         unsafe { locien_write(reg, 1u32 << bit, false) };
     }
-    clear_pending(irq);
 }
 
 /// Whether the given interrupt source is currently enabled at the controller.
