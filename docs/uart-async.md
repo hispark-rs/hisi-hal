@@ -29,7 +29,12 @@ Neither this algorithm nor a software waker prevents physical FIFO overrun.
   `read_byte` status/data path (`LINE_STATUS.data_available`). The receive-count
   alias must not be substituted across chips. The initial extraction incorrectly
   used that count and is corrected here; its host-only FIFO tests could not
-  establish which hardware register to read. The former per-port one-byte software latch could be overwritten
+  establish which hardware register to read. A pending read also selects the
+  existing blocking FIFO levels (RX one byte, TX empty), keeps FIFO enabled and
+  issues no reset strobes. It no longer relies on the constructor's quarter-full
+  DMA threshold or character timeout to wake for a short input. These levels
+  remain after cancellation; DMA setup selects its own levels on its next use.
+  The former per-port one-byte software latch could be overwritten
   by another interrupt before consumption, and a cancelled waiter left RX
   enabled. Both paths are removed. This is a behavior fix, not inherited HIL
   qualification. Only RX-data interrupts are owned; route the UART on its

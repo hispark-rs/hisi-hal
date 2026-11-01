@@ -1,6 +1,6 @@
 //! Legacy WS63 UART register adapter; RX lifecycle is shared.
 use super::async_receive::{ReceiveWait, RxIo, WakerSlot};
-use super::{Uart, UartInstance, UartPort, uart_regs};
+use super::{Uart, UartInstance, UartPort, uart_regs, write_fifo_blocking_levels};
 use crate::peripherals::{Uart0, Uart1, Uart2};
 use core::{cell::Cell, convert::Infallible, future::poll_fn, task::Waker};
 use critical_section::Mutex;
@@ -40,7 +40,12 @@ impl<T: UartInstance> RxIo for PacRx<'_, '_, T> {
         self.uart.read_byte().ok_or(nb::Error::WouldBlock)
     }
     fn arm(&mut self) {
-        uart_regs(self.port).intr_en().modify(|_, w| w.rece_data_intr_en().set_bit());
+        let r = uart_regs(self.port);
+        // One-byte Read must not depend on the constructor's DMA-oriented
+        // quarter-full threshold or an unverified character-timeout path.
+        // This existing configuration keeps FIFO enabled with no reset strobes.
+        write_fifo_blocking_levels(r);
+        r.intr_en().modify(|_, w| w.rece_data_intr_en().set_bit());
     }
     fn disarm(&mut self) {
         uart_regs(self.port).intr_en().modify(|_, w| w.rece_data_intr_en().clear_bit());
