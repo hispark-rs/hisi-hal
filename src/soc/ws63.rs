@@ -116,6 +116,9 @@ pub const I2C_CLOCK_HZ: u32 = TCXO_HZ;
 /// Number of GPIO pins (19: GPIO0[7:0] + GPIO1[15:8] + GPIO2[18:16]).
 pub const GPIO_COUNT: usize = 19;
 
+/// GPIO bank-to-local-IRQ binding used by the GPIO integration backend.
+pub(crate) const GPIO_INTERRUPTS: [Interrupt; 3] = [Interrupt::GPIO_INT0, Interrupt::GPIO_INT1, Interrupt::GPIO_INT2];
+
 /// Number of ULP GPIO pins (8: GPIO107-114).
 pub const ULP_GPIO_COUNT: usize = 8;
 

@@ -1,42 +1,13 @@
 //! Single-hart GPIO waits; one waiter per exclusively borrowed bank.
 use super::{GpioBank, GpioDriver, GpioLine, Input, InterruptTrigger, bitmap, cancel, read_level};
+use crate::gpio_async::{Signal, Wait, WaitIo};
 use crate::{
     interrupt,
     peripherals::{Gpio0, Gpio1, Gpio2},
 };
-use core::{
-    cell::Cell,
-    convert::Infallible,
-    future::poll_fn,
-    marker::PhantomData,
-    task::{Context, Poll, Waker},
-};
-use critical_section::Mutex;
+use core::{convert::Infallible, marker::PhantomData};
 
-struct Signal {
-    line: Cell<Option<GpioLine>>,
-    fired: Cell<bool>,
-    waker: Cell<Option<Waker>>,
-}
-impl Signal {
-    const fn new() -> Self {
-        Self { line: Cell::new(None), fired: Cell::new(false), waker: Cell::new(None) }
-    }
-    fn clear(&self) -> Option<Waker> {
-        self.line.set(None);
-        self.fired.set(false);
-        self.waker.take()
-    }
-    fn fire(&self, line: GpioLine) -> Option<Waker> {
-        if self.line.get() != Some(line) {
-            return None;
-        }
-        self.line.set(None);
-        self.fired.set(true);
-        self.waker.take()
-    }
-}
-static SIGNALS: Mutex<[Signal; 3]> = Mutex::new([const { Signal::new() }; 3]);
+static SIGNALS: [Signal<GpioLine>; 3] = [const { Signal::new() }; 3];
 fn index(bank: GpioBank) -> usize {
     match bank {
         GpioBank::Bank0 => 0,
@@ -44,13 +15,12 @@ fn index(bank: GpioBank) -> usize {
         GpioBank::Bank2 => 2,
     }
 }
-fn signal<R>(bank: GpioBank, f: impl FnOnce(&Signal) -> R) -> R {
-    critical_section::with(|cs| f(&SIGNALS.borrow(cs)[index(bank)]))
+fn signal(bank: GpioBank) -> &'static Signal<GpioLine> {
+    &SIGNALS[index(bank)]
 }
 fn reset(line: GpioLine) {
-    // MMIO is outside critical sections; this bank's IRQ is disabled first.
     cancel(line);
-    drop(signal(line.bank(), Signal::clear));
+    signal(line.bank()).clear();
 }
 
 /// Refused async takeover. No registers or wakers have been changed.
@@ -119,7 +89,7 @@ impl GpioDriver<'_> {
         // Clear controller BEFORE observing the peripheral, so a later edge is
         // not cleared after a false observation. Never EOI an unobserved edge.
         interrupt::clear_pending(bank.interrupt());
-        let Some(line) = signal(bank, |s| s.line.get()) else {
+        let Some(line) = signal(bank).active_line() else {
             return false;
         };
         let pending = bank!(bank, r, bitmap(r.gpio_intr().read().gpio_intr().bits()));
@@ -128,52 +98,35 @@ impl GpioDriver<'_> {
             return false;
         }
         cancel(line);
-        let waker = signal(bank, |s| s.fire(line));
-        if let Some(waker) = waker {
-            waker.wake();
-        }
-        true
+        signal(bank).notify(line)
     }
 }
 fn level_satisfied(trigger: InterruptTrigger, high: bool) -> bool {
     matches!((trigger, high), (InterruptTrigger::HighLevel, true) | (InterruptTrigger::LowLevel, false))
 }
-struct Wait<'b, 'a, 'd, 'p> {
+struct InputWait<'b, 'a, 'd, 'p> {
     input: &'b mut Input<'a, 'd, 'p>,
     trigger: InterruptTrigger,
-    started: bool,
 }
-impl Wait<'_, '_, '_, '_> {
-    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        let waker = cx.waker().clone();
-        let line = self.input.line;
-        let bank = line.bank();
-        unsafe { interrupt::disable(bank.interrupt()) };
-        if !self.started {
-            self.input.listen(self.trigger);
-            signal(bank, |s| {
-                s.fired.set(false);
-                s.line.set(Some(line));
-            });
-            self.started = true;
-        }
-        // Register before inspecting the condition or allowing ISR delivery.
-        let (old, fired) = signal(bank, |s| (s.waker.replace(Some(waker)), s.fired.get()));
-        let ready = fired || level_satisfied(self.trigger, read_level(line));
-        if ready {
-            reset(line);
-        } else {
-            unsafe { interrupt::enable(bank.interrupt()) };
-        }
-        drop(old);
-        if ready { Poll::Ready(()) } else { Poll::Pending }
+impl WaitIo for InputWait<'_, '_, '_, '_> {
+    type Line = GpioLine;
+    fn line(&self) -> GpioLine {
+        self.input.line
     }
-}
-impl Drop for Wait<'_, '_, '_, '_> {
-    fn drop(&mut self) {
-        if self.started {
-            reset(self.input.line);
-        }
+    fn pause(&mut self) {
+        unsafe { interrupt::mask(self.line().bank().interrupt()) };
+    }
+    fn configure(&mut self) {
+        self.input.listen(self.trigger);
+    }
+    fn resume(&mut self) {
+        unsafe { interrupt::enable(self.line().bank().interrupt()) };
+    }
+    fn stop(&mut self) {
+        cancel(self.line());
+    }
+    fn level_matches(&mut self) -> bool {
+        level_satisfied(self.trigger, read_level(self.line()))
     }
 }
 impl Drop for AsyncInput<'_, '_, '_, '_> {
@@ -183,8 +136,8 @@ impl Drop for AsyncInput<'_, '_, '_, '_> {
 }
 impl AsyncInput<'_, '_, '_, '_> {
     async fn wait(&mut self, trigger: InterruptTrigger) {
-        let mut wait = Wait { input: &mut *self.input, trigger, started: false };
-        poll_fn(|cx| wait.poll(cx)).await;
+        let signal = signal(self.input.line.bank());
+        Wait::new(InputWait { input: &mut *self.input, trigger }, signal).await;
     }
 }
 impl embedded_hal::digital::ErrorType for AsyncInput<'_, '_, '_, '_> {
@@ -215,21 +168,7 @@ impl embedded_hal_async::digital::Wait for AsyncInput<'_, '_, '_, '_> {
 
 #[cfg(all(test, not(target_arch = "riscv32")))]
 mod tests {
-    use super::super::Pad;
     use super::*;
-    use std::{
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-        task::Wake,
-    };
-    struct Counter(AtomicUsize);
-    impl Wake for Counter {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
-    }
     #[test]
     fn level_match_never_completes_an_edge_wait() {
         for trigger in [InterruptTrigger::RisingEdge, InterruptTrigger::FallingEdge, InterruptTrigger::BothEdges] {
@@ -240,31 +179,5 @@ mod tests {
             assert_eq!(level_satisfied(InterruptTrigger::HighLevel, high), high);
             assert_eq!(level_satisfied(InterruptTrigger::LowLevel, high), !high);
         }
-    }
-    #[test]
-    fn unrelated_duplicate_and_cancelled_events_do_not_wake_or_complete() {
-        let s = Signal::new();
-        let line = Pad::Mgpio17.gpio_line().unwrap();
-        let other = Pad::Mgpio18.gpio_line().unwrap();
-        let a = Arc::new(Counter(AtomicUsize::new(0)));
-        let b = Arc::new(Counter(AtomicUsize::new(0)));
-        s.line.set(Some(line));
-        s.waker.set(Some(Waker::from(a.clone())));
-        drop(s.waker.replace(Some(Waker::from(b.clone()))));
-        assert_eq!(Arc::strong_count(&a), 1);
-        assert!(s.fire(other).is_none());
-        assert!(!s.fired.get());
-        s.fire(line).unwrap().wake();
-        assert!(s.fired.get());
-        assert!(s.fire(line).is_none());
-        assert_eq!(b.0.load(Ordering::SeqCst), 1);
-        drop(s.clear());
-        assert!(!s.fired.get());
-        s.line.set(Some(line));
-        s.waker.set(Some(Waker::from(a.clone())));
-        drop(s.clear());
-        assert!(s.fire(line).is_none());
-        assert_eq!(Arc::strong_count(&a), 1);
-        assert_eq!(a.0.load(Ordering::SeqCst), 0);
     }
 }
