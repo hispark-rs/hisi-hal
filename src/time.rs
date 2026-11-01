@@ -24,12 +24,9 @@ impl Instant {
             tcxo.tcxo_status().write(|w| w.bits(status | 0x01));
         }
         while tcxo.tcxo_status().read().bits() & 0x10 == 0 {}
-        // Read 64-bit counter
-        let c0 = tcxo.tcxo_count0().read().bits() as u64;
-        let c1 = tcxo.tcxo_count1().read().bits() as u64;
-        let c2 = tcxo.tcxo_count2().read().bits() as u64;
-        let c3 = tcxo.tcxo_count3().read().bits() as u64;
-        Instant((c3 << 48) | (c2 << 32) | (c1 << 16) | c0)
+        // Share the audited IP representation with TcxoDriver. WS63 uses two
+        // 32-bit words; only BS2X uses four 16-bit words. Preserve raw tick units.
+        Instant(crate::tcxo_words::read_counter(tcxo))
     }
 
     /// Returns the amount of time elapsed since this instant.

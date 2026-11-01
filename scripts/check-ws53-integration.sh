@@ -3,8 +3,7 @@
 # that are not published yet. This is not crates.io release qualification.
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-pac_rev=8dc9a3d2582a29e90338c71d26b4e27d88d3d503
-runtime_rev=03fbef84017a00dfef6f67b102096a20318731c4
+runtime_rev=eb3e2d55a41c7655c2be83e465e5dc524eb1d7cb
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 # Copy tracked project files, including staged additions, without parent workspace
@@ -13,20 +12,19 @@ git -C "$root" ls-files -z | tar -C "$root" --null -T - -cf - | tar -C "$work" -
 mkdir -p "$work/.cargo"
 cat > "$work/.cargo/config.toml" <<CONFIG
 [patch.crates-io]
-ws53-pac = { git = "https://github.com/hispark-rs/ws53-pac.git", rev = "$pac_rev" }
 hisi-riscv-rt = { git = "https://github.com/hispark-rs/hisi-riscv-rt.git", rev = "$runtime_rev" }
 CONFIG
 cd "$work"
 printf '%s\n' 'WS53 pre-release integration: remote overrides; not registry release validation.'
 cargo generate-lockfile
-features=chip-ws53,rt,unstable,async,embassy,defmt
+features=chip-ws53,rt,unstable,async,defmt
 cargo test --locked --target x86_64-unknown-linux-gnu --no-default-features --features "$features"
 cargo clippy --locked -Zbuild-std=core,alloc --target riscv32imfc-unknown-none-elf --no-default-features --features "$features" -- -D warnings
 # Cargo resolves optional dependencies even when these old-chip features do not
-# enable WS53. Until ws53-pac is published, preserve their independent host and
+# enable WS53. Until WS53 runtime support is published, preserve independent host and
 # target regression coverage with the same pinned remote integration overrides.
 # The registry-only release jobs remain separate and must still pass for release.
-for features in chip-ws63,rt,async,embassy,unstable chip-bs21,rt,unstable; do
+for features in chip-ws63,rt,async,unstable chip-bs21,rt,unstable; do
     cargo test --locked --target x86_64-unknown-linux-gnu --no-default-features --features "$features"
     cargo clippy --locked -Zbuild-std=core,alloc --target riscv32imfc-unknown-none-elf --no-default-features --features "$features" -- -D warnings
 done

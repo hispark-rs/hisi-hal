@@ -3,12 +3,8 @@
 
 pub use ws63_pac::interrupt::ExternalInterrupt as Interrupt;
 
-/// Interrupt fired by the TIMER channel the embassy-time driver uses for alarms.
-///
-/// WS63 routes TIMER channel 0 to `TIMER_INT0` (IRQ 26, a standard `mie`-bit
-/// local interrupt). The `embassy` time-driver and the app's trap handler reach
-/// this through [`crate::soc::chip::ALARM_INTERRUPT`] so the alarm wiring is
-/// chip-neutral (BS2X uses a different IRQ — see `soc/bs21.rs`).
+/// TIMER channel 0 interrupt (legacy constant name retained for compatibility).
+/// This identifies hardware only; it reserves no channel for any scheduler.
 pub const ALARM_INTERRUPT: Interrupt = Interrupt::TIMER_INT0;
 
 /// System clock frequency (240 MHz).

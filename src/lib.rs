@@ -213,19 +213,6 @@ pub mod sdio;
 #[cfg(feature = "chip-ws53")]
 #[path = "symc_ws53.rs"]
 pub mod symc;
-// The embassy driver obtains clocks/IRQ from `soc::chip`; TCXO counter layout
-// is selected separately for WS63 (two words) and BS21 (four halfword fields).
-unstable_driver! {
-    /// embassy-time `Driver` implementation backed by TCXO/TIMER for `embassy-executor`.
-    #[cfg(feature = "embassy")]
-    #[cfg(not(feature = "chip-ws53"))]
-    pub mod embassy;
-}
-#[cfg(all(feature = "chip-ws53", feature = "embassy"))]
-#[path = "embassy_ws53.rs"]
-pub mod embassy;
-#[cfg(all(feature = "embassy", feature = "unstable"))]
-mod embassy_time_math;
 // I2C is a DIFFERENT IP per chip: WS63 has a custom v150 core (i2c.rs), BS2X has a
 // Synopsys DesignWare v151 core (i2c_v151.rs). Both are exposed as `hal::i2c`; the
 // register blocks come from each chip's PAC (the BS2X v151 layout was rewritten

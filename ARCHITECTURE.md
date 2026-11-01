@@ -1,11 +1,12 @@
 # hisi-hal 架构
 
-本仓库是 [ws63-rs](https://github.com/hispark-rs/ws63-rs) monorepo 的子模块。
+HAL 独立开发、测试、版本和发布，父仓负责跨仓集成与实板验收。
+驱动通过当前芯片 PAC 访问硬件；SoC 层提供实例、引脚、IRQ、时钟和请求路由。
+相同 IP 的状态机、数据处理、错误和等待逻辑共用；真实寄存器行为差异使用必要后端。
 
-`hisi-hal` 是 WS63 的手写安全驱动层（31 个外设），基于 `embedded-hal 1.0`，采用外设单例 + `'d` 生命周期、
-sealed trait、`#![no_std]` 设计。
+HAL 保留 `embedded-hal`、`embedded-io` 和标准 async trait，以及与执行器无关的
+Future/Waker/取消逻辑。HAL 不依赖 `hisi-rtos` 或 Embassy 队列、时间驱动、执行器。
+`hisi-rtos → hisi-hal → PAC`；应用和平台初始化负责组装、时钟及资源交接。
+硬件 IPC 属于 HAL，厂商协议、控制核服务、镜像布局和板卡接线属于上层组件。
 
-完整架构与评审（集中维护于主仓库）：
-- 组件文档：<https://github.com/hispark-rs/ws63-rs/blob/main/docs/architecture/hisi-hal.md>
-- 总体架构：<https://github.com/hispark-rs/ws63-rs/blob/main/docs/architecture/overview.md>
-- 整改排期：<https://github.com/hispark-rs/ws63-rs/blob/main/ROADMAP.md>
+接口契约以 API 文档为准；实验迁移见 MIGRATION.md；芯片行为和历史证据见 docs/。

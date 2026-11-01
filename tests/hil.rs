@@ -356,7 +356,7 @@ mod tests {
         crate::gadc::gadc_register_liveness();
     }
 
-    #[cfg(all(feature = "chip-ws63", not(feature = "async"), not(feature = "embassy")))]
+    #[cfg(all(feature = "chip-ws63", not(feature = "async")))]
     #[test]
     fn timer_int0_named_routing() {
         crate::irq::timer_int0_named_routing();

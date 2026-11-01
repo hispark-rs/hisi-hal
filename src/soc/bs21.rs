@@ -11,14 +11,8 @@
 
 pub use bs2x_pac::interrupt::ExternalInterrupt as Interrupt;
 
-/// Interrupt fired by the TIMER channel the embassy-time driver uses for alarms.
-///
-/// BS2X routes TIMER channel 0 to `TIMER_0` (IRQ 53, a HiSilicon custom LOCI
-/// local interrupt — `chip_core_irq.h`: `LOCAL_INTERRUPT0 + 27`). The `embassy`
-/// time-driver and the app's trap handler reach this through
-/// [`crate::soc::chip::ALARM_INTERRUPT`] so the alarm wiring is chip-neutral
-/// (WS63 uses IRQ 26 — see `soc/ws63.rs`). The LOCI controller delivers it with
-/// `mcause = 53`, identical decode to the WS63 path.
+/// TIMER channel 0 interrupt (legacy constant name retained for compatibility).
+/// This identifies hardware only; it reserves no channel for any scheduler.
 pub const ALARM_INTERRUPT: Interrupt = Interrupt::TIMER_0;
 
 /// CPU clock (64 MHz — BS21/BS21E/BS22 all run the app core at 64 MHz).

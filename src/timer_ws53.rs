@@ -151,6 +151,12 @@ impl<'d> TimerDriver<'d> {
         channel!(ch, r, reg, timer_control0, timer_control1, reg.modify(|_, w| w.enable().set_bit()));
     }
 
+    /// Query the enable bit without changing state or acknowledging an event.
+    pub fn is_enabled(&self, ch: TimerChannel) -> bool {
+        let r = self.regs();
+        channel!(ch, r, reg, timer_control0, timer_control1, reg.read().enable().bit_is_set())
+    }
+
     /// Stop counting; does not consume a pending interrupt.
     pub fn disable(&mut self, ch: TimerChannel) {
         let r = self.regs();

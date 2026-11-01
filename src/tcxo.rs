@@ -27,12 +27,13 @@ pub(crate) const TCXO_VALID_BIT: u32 = 1 << 4;
 /// TCXO 64-bit counter driver.
 pub struct TcxoDriver<'d> {
     _tcxo: Tcxo<'d>,
+    pending_snapshot: bool,
 }
 
 impl<'d> TcxoDriver<'d> {
     /// Create a new TCXO driver.
     pub fn new(tcxo: Tcxo<'d>) -> Self {
-        Self { _tcxo: tcxo }
+        Self { _tcxo: tcxo, pending_snapshot: false }
     }
 
     fn regs(&self) -> &'static crate::soc::pac::tcxo::RegisterBlock {
@@ -93,6 +94,9 @@ impl<'d> TcxoDriver<'d> {
     /// Triggers a refresh and reads the chip-specific counter representation.
     /// Returns `None` if the refresh timed out.
     pub fn read_counter(&self) -> Option<u64> {
+        if self.pending_snapshot {
+            return None;
+        }
         self.refresh().ok()?;
         Some(crate::tcxo_words::read_counter(self.regs()))
     }
@@ -101,8 +105,39 @@ impl<'d> TcxoDriver<'d> {
     ///
     /// Returns `None` if the refresh timed out.
     pub fn read_counter32(&self) -> Option<u32> {
+        if self.pending_snapshot {
+            return None;
+        }
         self.refresh().ok()?;
         Some(crate::tcxo_words::read_counter32(self.regs()))
+    }
+
+    /// Whether the hardware counter is enabled; this is not a frequency measurement.
+    #[instability::unstable]
+    pub fn is_enabled(&self) -> bool {
+        self.regs().tcxo_status().read().bits() & TCXO_EN_BIT != 0
+    }
+
+    /// Start or continue one snapshot, checking VALID once without spinning.
+    /// `WouldBlock` retains the request across calls. Do not reset, disable or
+    /// otherwise use the snapshot window while a request is pending.
+    /// A disabled counter returns `Other(())` without issuing a refresh.
+    #[instability::unstable]
+    pub fn poll_counter(&mut self) -> nb::Result<u64, ()> {
+        if !self.is_enabled() {
+            return Err(nb::Error::Other(()));
+        }
+        let r = self.regs();
+        if !self.pending_snapshot {
+            let status = r.tcxo_status().read().bits();
+            unsafe { r.tcxo_status().write(|w| w.bits(status | TCXO_REFRESH_BIT)) };
+            self.pending_snapshot = true;
+        }
+        if r.tcxo_status().read().bits() & TCXO_VALID_BIT == 0 {
+            return Err(nb::Error::WouldBlock);
+        }
+        self.pending_snapshot = false;
+        Ok(crate::tcxo_words::read_counter(r))
     }
 
     /// Check if the counter value is valid after a refresh.

@@ -11,6 +11,7 @@ use core::time::Duration;
 
 /// Snapshot failure, distinct from a successfully sampled zero counter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum TcxoError {
     /// The counter is not enabled; no refresh command was sent.
     Disabled,
@@ -118,11 +119,10 @@ impl<'d> TcxoDriver<'d> {
         let regs = self.regs();
         discard(&mut PacRegisters(regs), &mut self.pending)
     }
-    // The global time driver owns this window permanently after an idle handoff.
-    // Its pending request remains active across calls, rather than being cancelled
-    // by a dropped public CounterSnapshot. Exactly one VALID read, never a loop.
-    #[cfg(feature = "embassy")]
-    pub(crate) fn poll_time_counter(&mut self) -> nb::Result<CounterTicks, TcxoError> {
+    /// Start or continue a retained snapshot; inspect VALID once without spinning.
+    /// A pending request owns the snapshot window until completion or explicit
+    /// discard. This is independent of any executor or time framework.
+    pub fn poll_counter(&mut self) -> nb::Result<CounterTicks, TcxoError> {
         let regs = self.regs();
         let mut io = PacRegisters(regs);
         if !self.pending {
@@ -130,8 +130,9 @@ impl<'d> TcxoDriver<'d> {
         }
         poll(&mut io, &mut self.pending)
     }
-    #[cfg(feature = "embassy")]
-    pub(crate) fn time_source_ready(&self) -> Result<(), TcxoError> {
+    /// Check that counting is enabled and this driver has no retained request.
+    /// Performs no writes; does not prove ownership against another core or DMA.
+    pub fn snapshot_ready(&self) -> Result<(), TcxoError> {
         if self.pending {
             return Err(TcxoError::SnapshotBusy);
         }

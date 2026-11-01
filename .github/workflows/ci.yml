@@ -60,13 +60,13 @@ jobs:
   # NB: chip-ws63 and chip-bs21 are mutually exclusive (a compile_error in lib.rs),
   # so `--all-features` cannot be used. Test each chip with its supported feature
   # set instead. BS2X is experimental/no-silicon-HIL, so chip-bs21 always opts into
-  # `unstable`; async/embassy are only wired for chip-ws63 today.
+  # `unstable`; async are only wired for chip-ws63 today.
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        features: ["chip-ws63,rt,async,embassy", "chip-ws63,rt,async,embassy,defmt", "chip-bs21,rt,unstable"]
+        features: ["chip-ws63,rt,async", "chip-ws63,rt,async,defmt", "chip-bs21,rt,unstable"]
     steps:
       - uses: actions/checkout@v4
       - run: rustup show active-toolchain
@@ -77,7 +77,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        features: ["chip-ws63,rt,async,embassy", "chip-ws63,rt,async,embassy,defmt", "chip-bs21,rt,unstable"]
+        features: ["chip-ws63,rt,async", "chip-ws63,rt,async,defmt", "chip-bs21,rt,unstable"]
     steps:
       - uses: actions/checkout@v4
       - run: rustup show active-toolchain
@@ -105,7 +105,7 @@ jobs:
       - run: rustup show active-toolchain
       # The HAL has no default chip (esp-hal style) — docs must select one, matching
       # the [package.metadata.docs.rs] feature set.
-      - run: cargo doc -Zbuild-std=core,alloc --target "$TARGET" --locked --no-deps --document-private-items --no-default-features --features "chip-ws63,rt,async,embassy"
+      - run: cargo doc -Zbuild-std=core,alloc --target "$TARGET" --locked --no-deps --document-private-items --no-default-features --features "chip-ws63,rt,async"
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -120,7 +120,7 @@ jobs:
   # so we check ONLY the explicitly-listed `chip-ws63` feature — not the default
   # group (which would fire the no-chip `compile_error!`) and not `--all-features`
   # (chip-ws63/chip-bs21 are mutually exclusive). chip-ws63 is the core host-buildable
-  # surface; async/embassy/rt are riscv-target-only and out of the host semver scope.
+  # surface; async/rt are riscv-target-only and out of the host semver scope.
   semver:
     name: SemVer
     runs-on: ubuntu-latest
@@ -140,3 +140,10 @@ jobs:
         with:
           feature-group: only-explicit-features
           features: chip-ws63
+
+  dependency-boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: bash scripts/check-no-embassy.sh
