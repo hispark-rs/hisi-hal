@@ -642,6 +642,10 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// Buffers must be owned or statically borrowed: forgetting the guard must
     /// not let an in-flight DMA access a returned stack allocation. This bound
     /// does not prove completion, bus drain, or cache-line exclusivity.
+    /// The controller must also be owned for `'static`: a short `reborrow()`
+    /// would let its original token become usable after the guard is forgotten,
+    /// despite the retained transfer still owning live hardware state. Pass the
+    /// original `Peripherals::DMA` token to `new_dma` instead of reborrowing it.
     /// The source cache lines are cleaned before launch and the destination
     /// invalidated on `wait()` (the WS63 core is non-coherent), so the cache
     /// maintenance lives inside the type rather than being a caller obligation.
@@ -661,6 +665,28 @@ impl<'d> DmaDriver<'d, Dma0> {
     ///     let _guard = driver.start_mem_to_mem(channel, src, dst);
     /// }
     /// ```
+    /// A reborrowed controller cannot escape through a forgotten guard either:
+    /// ```compile_fail,E0521
+    /// use hisi_hal::{dma::DmaDriver, peripherals::Dma};
+    /// fn forgotten(token: &mut Dma<'static>, src: &'static [u32], dst: &'static mut [u32]) {
+    ///     let driver = DmaDriver::new_dma(token.reborrow());
+    ///     let channels = driver.split_channels().unwrap();
+    ///     if let Ok(transfer) = driver.start_mem_to_mem(channels.ch0, src, dst) {
+    ///         core::mem::forget(transfer);
+    ///     }
+    ///     let mut reclaimed = DmaDriver::new_dma(token.reborrow());
+    ///     reclaimed.enable_controller();
+    /// }
+    /// ```
+    /// Moving the original controller token remains supported:
+    /// ```no_run
+    /// use hisi_hal::{dma::DmaDriver, peripherals::Dma};
+    /// fn owned(token: Dma<'static>, src: &'static [u32], dst: &'static mut [u32]) {
+    ///     let driver = DmaDriver::new_dma(token);
+    ///     let channels = driver.split_channels().unwrap();
+    ///     let _transfer = driver.start_mem_to_mem(channels.ch0, src, dst);
+    /// }
+    /// ```
     #[instability::unstable]
     pub fn start_mem_to_mem<SRC, DST>(
         mut self,
@@ -669,6 +695,7 @@ impl<'d> DmaDriver<'d, Dma0> {
         mut dst: DST,
     ) -> Result<Transfer<'d, SRC, DST>, DmaStartError<'d, SRC, DST>>
     where
+        'd: 'static,
         SRC: ReadBuffer<Word = u32> + 'static,
         DST: WriteBuffer<Word = u32> + 'static,
     {
@@ -1242,6 +1269,8 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// single-block DMA `trans_size` cap — chunk the buffer). On `Err` the driver,
     /// channel, and buffer are dropped (the channel claim is released).
     /// An empty buffer returns [`DmaError::EmptyBuffer`] without starting DMA.
+    /// The controller lifetime must be `'static`, as for `start_mem_to_mem`;
+    /// static buffers alone cannot protect a forgotten controller reborrow.
     ///
     /// # Safety
     /// The caller must exclusively own the actual peripheral and establish that
@@ -1261,6 +1290,15 @@ impl<'d> DmaDriver<'d, Dma0> {
     ///         DmaPeripheral::Spi0Tx, DmaFrame::Byte, ctl);
     /// }
     /// ```
+    /// Even an unsafe peripheral start cannot use a short controller borrow:
+    /// ```compile_fail,E0521
+    /// use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver, DmaFrame, DmaPeripheral, PeriDmaCtl};
+    /// unsafe fn borrowed<'a>(driver: DmaDriver<'a, Dma0>, ch: DmaChannel,
+    ///                        data: &'static [u8], address: usize, ctl: PeriDmaCtl) {
+    ///     let _ = unsafe { driver.start_mem_to_peripheral(ch, data, address,
+    ///         DmaPeripheral::Spi0Tx, DmaFrame::Byte, ctl) };
+    /// }
+    /// ```
     #[instability::unstable]
     pub unsafe fn start_mem_to_peripheral<SRC>(
         mut self,
@@ -1272,6 +1310,7 @@ impl<'d> DmaDriver<'d, Dma0> {
         peri_dis: PeriDmaCtl,
     ) -> Result<PeripheralTransfer<'d, SRC>, DmaError>
     where
+        'd: 'static,
         SRC: ReadBuffer<Word = u8> + 'static,
     {
         if frame != DmaFrame::Byte {
@@ -1326,6 +1365,15 @@ impl<'d> DmaDriver<'d, Dma0> {
     /// The TX method's peripheral address, request routing, exclusivity,
     /// buffer lifetime, independent drain and cache visibility requirements
     /// also apply. Destination cache lines must be exclusively held until drain.
+    ///
+    /// ```compile_fail,E0521
+    /// use hisi_hal::dma::{Dma0, DmaChannel, DmaDriver, DmaFrame, DmaPeripheral, PeriDmaCtl};
+    /// unsafe fn borrowed<'a>(driver: DmaDriver<'a, Dma0>, ch: DmaChannel,
+    ///                        data: &'static mut [u8], address: usize, ctl: PeriDmaCtl) {
+    ///     let _ = unsafe { driver.start_peripheral_to_mem(ch, data, address,
+    ///         DmaPeripheral::Spi0Rx, DmaFrame::Byte, ctl) };
+    /// }
+    /// ```
     #[instability::unstable]
     pub unsafe fn start_peripheral_to_mem<DST>(
         mut self,
@@ -1337,6 +1385,7 @@ impl<'d> DmaDriver<'d, Dma0> {
         peri_dis: PeriDmaCtl,
     ) -> Result<PeripheralTransfer<'d, DST>, DmaError>
     where
+        'd: 'static,
         DST: WriteBuffer<Word = u8> + 'static,
     {
         if frame != DmaFrame::Byte {
