@@ -804,15 +804,6 @@ macro_rules! impl_nb_serial {
                 }
             }
         }
-        impl embedded_hal_nb::serial::Write for Uart<'_, $uart> {
-            fn write(&mut self, byte: u8) -> nb::Result<(), Self::Error> {
-                self.write_byte(byte);
-                Ok(())
-            }
-            fn flush(&mut self) -> nb::Result<(), Self::Error> {
-                if self.tx_flushed() { Ok(()) } else { Err(nb::Error::WouldBlock) }
-            }
-        }
     };
 }
 
@@ -822,6 +813,24 @@ impl_nb_serial!(Uart0<'_>);
 impl_nb_serial!(Uart1<'_>);
 #[cfg(not(feature = "chip-ws53"))]
 impl_nb_serial!(Uart2<'_>);
+
+// All instances use the same bounded TX attempt. ErrorType and flush status
+// remain backend-specific (WS53 status reads also preserve receive errors).
+impl<T: UartInstance> embedded_hal_nb::serial::Write for Uart<'_, T>
+where
+    Self: embedded_hal_nb::serial::ErrorType,
+{
+    fn write(&mut self, byte: u8) -> nb::Result<(), Self::Error> {
+        self.try_write_byte(byte).map_err(|error| match error {
+            nb::Error::WouldBlock => nb::Error::WouldBlock,
+            nb::Error::Other(infallible) => match infallible {},
+        })
+    }
+
+    fn flush(&mut self) -> nb::Result<(), Self::Error> {
+        if self.tx_flushed() { Ok(()) } else { Err(nb::Error::WouldBlock) }
+    }
+}
 
 // ── Async UART (embedded-io-async) ──────────────────────────────────────────
 #[cfg(all(feature = "chip-ws63", feature = "async", feature = "unstable"))]

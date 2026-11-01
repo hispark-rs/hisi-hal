@@ -284,17 +284,6 @@ impl<T: UartInstance> embedded_hal_nb::serial::Read for Uart<'_, T> {
         self.read_byte()
     }
 }
-impl<T: UartInstance> embedded_hal_nb::serial::Write for Uart<'_, T> {
-    fn write(&mut self, word: u8) -> nb::Result<(), Self::Error> {
-        self.try_write_byte(word).map_err(|error| match error {
-            nb::Error::WouldBlock => nb::Error::WouldBlock,
-            nb::Error::Other(infallible) => match infallible {},
-        })
-    }
-    fn flush(&mut self) -> nb::Result<(), Self::Error> {
-        if self.tx_flushed() { Ok(()) } else { Err(nb::Error::WouldBlock) }
-    }
-}
 
 #[cfg(all(test, not(target_arch = "riscv32")))]
 mod tests {

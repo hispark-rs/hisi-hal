@@ -55,7 +55,28 @@ waker replacement, wake during poll, unpolled drop, cancellation with retained
 arrival, coalesced/duplicate notifications and empty notification. These check
 software ordering and lifecycle with a retained FIFO model, not electrical or
 interrupt-controller behavior. The parent's QEMU and HIL evidence must identify
-the actual backend and model used. In particular the existing WS63 QEMU UART
-lacks RX FIFO count and complete IRQ mask/reassert behavior and cannot qualify
-this receive path yet. Physical timing, all UART instances, overflow/errors,
-and the separate `block_on` idle race remain open qualifications.
+the actual backend and model used. The parent now exercises actual WS63 RX/IRQ/cancellation against the shared
+WS63/BS2X FIFO model, including mask/reassert and one-byte notification. This
+does not qualify the receive-count alias (which remains deliberately diagnosed),
+physical timing, all real UART instances or overflow/error behavior. The separate
+`block_on` idle race also remains open.
+
+
+## Shared nonblocking transmit contract
+
+All chips and instances forward `embedded_hal_nb::serial::Write::write` to the
+same bounded `try_write_byte` path. A full FIFO returns `WouldBlock` without
+writing DATA. Earlier WS63/BS2X trait implementations incorrectly called the
+blocking `write_byte`; this is a behavior correction, not just a file move.
+The blocking methods intentionally retain their existing semantics.
+
+The trait's error type and `tx_flushed` remain backend-specific: legacy chips
+check FIFO-empty, while WS53 also waits for the shift register and preserves
+read-clear RX errors. This change does not assert that these flush contracts are
+equivalent, nor turn legacy async TX into an interrupt-driven implementation.
+
+Parent integration verifies the public trait with a virtual peer under explicit
+FIFO backpressure, repeated rejected writes, ordered drain and recovery. The
+same fixture with the old HAL stalls before reporting full. The synthetic FIFO
+capacity is not a physical-depth or baud claim; new hardware acceptance remains
+pending. Child host tests and cross-chip feature/Clippy checks run independently.
