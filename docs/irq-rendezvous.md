@@ -37,3 +37,24 @@ Run the child repository's `scripts/check-ws53-integration.sh` for independent
 development checks (remote runtime revision, registry PACs); registry-only
 release qualification remains blocked until the required runtime is published.
 QEMU and physical-device acceptance belong to the parent integration repository.
+
+## Minimal `block_on`: software notification only
+
+The WS63 experimental helper now records wakes in static atomic metadata and
+consumes a coalesced notification before choosing WFI. It does not add a timer,
+software IRQ owner, task queue, allocation or Embassy dependency. Pending without
+a notification still takes the existing idle path; this is not a busy-poll fix.
+It uses the platform's existing atomic/critical-section contract on the owning
+hart, not a new cross-core synchronization guarantee.
+
+One invocation owns the static slot. Nested/concurrent calls panic before polling
+the new Future; normal return and unwinding release the claim. Wakers retained
+after completion are safe because they reference no stack data. A stale wake can
+only cause a spurious poll of a subsequent invocation, which every Future must
+already tolerate. Future polling/destruction and idle run outside metadata locks.
+
+The six tests in `src/asynch/block_on_tests.rs` cover Ready, repeated software
+wakes, actual idle selection, retained Wakers, nested/concurrent rejection and
+unwind recovery. They do **not** prove atomic sleep: an interrupt arriving after
+the notification check but before WFI remains an unresolved race. Do not infer
+complete executor or low-power qualification from the software-wake fix.
