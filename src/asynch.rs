@@ -71,9 +71,10 @@ fn wait_for_interrupt() {
 
 /// Drive one future, re-polling recorded wakes before considering `wfi`.
 ///
-/// Global interrupts must be enabled (`interrupt::enable_global`) and the
-/// completing peripheral's IRQ routed to its `on_interrupt`, or the `wfi` will
-/// never wake.
+/// For futures requiring hardware IRQ progress, global interrupts must be enabled
+/// (`interrupt::enable_global`) and the completing peripheral's IRQ routed to its
+/// `on_interrupt`, or `wfi` will never wake. Pure software-waking futures do not
+/// require interrupt delivery; this helper preserves the caller's enable state.
 ///
 /// # Limitations
 /// Software wakes issued during polling are coalesced and cause another poll.
