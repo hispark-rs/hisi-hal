@@ -48,6 +48,10 @@ mod ws53_async;
 #[cfg(all(feature = "chip-ws53", feature = "async"))]
 pub use ws53_async::{AsyncBindError, AsyncReceiver, AsyncTransmitter, TransmitInterrupt};
 
+#[cfg(all(feature = "async", feature = "chip-ws53"))]
+#[path = "uart/async_receive.rs"]
+mod async_receive;
+
 mod sealed {
     pub trait UartInstanceSealed {}
 }
