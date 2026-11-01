@@ -22,7 +22,7 @@ rust-version = "1.88"
 # `doc(cfg)`). Mirrors esp-hal.
 [package.metadata.docs.rs]
 default-target = "riscv32imfc-unknown-none-elf"
-features = ["chip-ws63", "rt", "async", "embassy", "unstable"]
+features = ["chip-ws63", "rt", "async", "unstable"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
@@ -41,9 +41,6 @@ embedded-dma = "0.2"
 embedded-hal-async = { version = "1.0", optional = true }
 # 0.6 to match embedded-io 0.6 (the blocking impls' ErrorType); 0.7 would need embedded-io 0.7.
 embedded-io-async = { version = "0.6", optional = true }
-# embassy-time driver (feature `embassy`): WS63 becomes an embassy-time provider.
-embassy-time-driver = { version = "0.2", optional = true }
-embassy-time-queue-utils = { version = "0.3", optional = true, features = ["generic-queue-16"] }
 embedded-io = "0.6"
 nb = "1"
 cfg-if = "1"
@@ -140,17 +137,6 @@ rt = ["dep:critical-section", "ws63-pac?/rt", "bs2x-pac?/rt", "ws53-pac?/rt"]
 # GPIO Wait, TIMER DelayNs, UART async I/O, DMA/LSADC async hooks) additionally
 # require `unstable` until their HIL and cancellation/lost-wake invariants close.
 async = ["dep:embedded-hal-async", "dep:embedded-io-async", "dep:critical-section"]
-# `embassy`: pulls the embassy-time dependencies. The public embassy-time driver
-# module is still behind `unstable` (no end-to-end HIL yet): use
-# `features = ["embassy", "unstable"]` to opt in.
-#
-# Deliberately does NOT enable `async`: the embassy-time driver only needs
-# critical-section + the embassy-time crates, whereas `async` pulls the
-# embedded-hal-async driver layer (`asynch`, per-driver `on_interrupt`) which is
-# still chip-ws63-only. Keeping them separate lets `embassy` work on BS2X today
-# (the time-driver's TCXO/TIMER access is register-identical across the family)
-# without dragging in the WS63-only async drivers.
-embassy = ["dep:critical-section", "dep:embassy-time-driver", "dep:embassy-time-queue-utils"]
 # `hil-loopback`: opt-in HIL tests that need external jumper wiring on the board
 # (the default HIL suite is self-contained / jumper-free). Enables the loopback
 # tests in tests/hil.rs — GPIO0↔GPIO3, SPI0 GPIO9↔GPIO11, UART1 GPIO15↔GPIO16.
@@ -164,7 +150,7 @@ defmt = ["dep:defmt"]
 # DOES populate the crystal: `--features chip-ws63,hil-rtc,unstable`.
 hil-rtc = []
 # `unstable`: opt-in to not-yet-HIL-proven surfaces (peripheral-DMA unproven subset,
-# UartDma, embassy, untested WS63 drivers, and the entire BS2X chip target).
+# UartDma, untested WS63 drivers, and the entire BS2X chip target).
 # `#[instability::unstable]` items are `pub` when this is on, `pub(crate)` when off
 # (soft-gate, esp-hal pattern). OFF by default — enabling is consent to breakage in
 # a minor release. Add to your Cargo.toml: `features = ["unstable"]`.

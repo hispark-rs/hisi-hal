@@ -1,3 +1,14 @@
+## Unreleased: Embassy moves to hisi-rtos
+
+The experimental `embassy` feature and `hisi_hal::embassy` module are removed.
+Use `hisi_rtos::embassy` with the matching chip and `unstable` features. WS53
+keeps its explicit `init(timer, clock)` handoff. WS63/BS2X must now also pass
+owned TIMER/TCXO drivers to `unsafe init` after configuring clocks/trap routing
+and before enabling global interrupts. No reverse dependency or re-export is
+provided. Select `embassy-only` for the TCXO profile; the existing `embassy` scheduler profile retains millisecond resolution.
+Blocking and executor-independent `async` HAL APIs remain available; ordinary
+HAL consumers need no Embassy dependency. This only migrates experimental APIs.
+
 ## Unreleased 0.7.0-alpha.10: hardware time capability preparation
 
 TIMER gains experimental `is_enabled` and (legacy IP) `set_interrupt_mask`.

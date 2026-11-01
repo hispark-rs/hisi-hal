@@ -11,6 +11,7 @@ use core::time::Duration;
 
 /// Snapshot failure, distinct from a successfully sampled zero counter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum TcxoError {
     /// The counter is not enabled; no refresh command was sent.
     Disabled,

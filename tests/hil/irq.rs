@@ -1,7 +1,7 @@
 use crate::hal;
 
 /// Full device.x-named TIMER_INT0 interrupt routing.
-#[cfg(all(feature = "chip-ws63", not(feature = "async"), not(feature = "embassy")))]
+#[cfg(all(feature = "chip-ws63", not(feature = "async")))]
 pub(crate) fn timer_int0_named_routing() {
     use core::sync::atomic::{AtomicBool, Ordering};
     use hal::interrupt;
