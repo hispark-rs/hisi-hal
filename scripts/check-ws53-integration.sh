@@ -25,7 +25,7 @@ cargo clippy --locked -Zbuild-std=core,alloc --target riscv32imfc-unknown-none-e
 # enable WS53. Until WS53 runtime support is published, preserve independent host and
 # target regression coverage with the same pinned remote integration overrides.
 # The registry-only release jobs remain separate and must still pass for release.
-for features in chip-ws63,rt,async,unstable chip-bs21,rt,unstable; do
+for features in chip-ws63 chip-ws63,rt,async chip-ws63,rt,async,unstable chip-bs21,rt,unstable; do
     cargo test --locked --target x86_64-unknown-linux-gnu --no-default-features --features "$features"
     cargo clippy --locked --target x86_64-unknown-linux-gnu --tests --no-default-features --features "$features" -- -D warnings
     cargo clippy --locked -Zbuild-std=core,alloc --target riscv32imfc-unknown-none-elf --no-default-features --features "$features" -- -D warnings
