@@ -48,6 +48,10 @@ mod ws53_async;
 #[cfg(all(feature = "chip-ws53", feature = "async"))]
 pub use ws53_async::{AsyncBindError, AsyncReceiver, AsyncTransmitter, TransmitInterrupt};
 
+#[cfg(all(feature = "async", any(feature = "chip-ws53", all(feature = "chip-ws63", feature = "unstable"))))]
+#[path = "uart/async_receive.rs"]
+mod async_receive;
+
 mod sealed {
     pub trait UartInstanceSealed {}
 }
@@ -821,94 +825,8 @@ impl_nb_serial!(Uart2<'_>);
 
 // ── Async UART (embedded-io-async) ──────────────────────────────────────────
 #[cfg(all(feature = "chip-ws63", feature = "async", feature = "unstable"))]
-mod asynch_impl {
-    use super::{Uart, UartPort, uart_regs};
-    use crate::asynch::IrqSignal;
-    use crate::peripherals::{Uart0, Uart1, Uart2};
-
-    use core::cell::Cell;
-    use core::future::Future;
-    use core::pin::Pin;
-    use core::task::{Context, Poll};
-    use critical_section::Mutex;
-    use embedded_io_async::{Read, Write};
-
-    static UART_RX: [IrqSignal; 3] = [IrqSignal::new(), IrqSignal::new(), IrqSignal::new()];
-    static UART_BYTE: [Mutex<Cell<u8>>; 3] = [const { Mutex::new(Cell::new(0)) }; 3];
-
-    /// UART trap hook: read the received byte (which de-asserts the RX IRQ) and
-    /// wake the awaiting reader. Call from the trap when `mcause` is UART0..2_INT
-    /// (IRQ 53..55). Reading in the ISR avoids a level-triggered RX storm.
-    pub fn on_interrupt(port: UartPort) {
-        let idx = port.index();
-        let r = uart_regs(port);
-        // Gate on rx_fifo_cnt, not rx_fifo_empty (the status bit does not track a
-        // single-byte pop on silicon — same fix as the blocking `read_byte`).
-        if r.rx_fifo_cnt().read().bits() != 0 {
-            let b = r.data().read().bits() as u8;
-            critical_section::with(|cs| UART_BYTE[idx].borrow(cs).set(b));
-            UART_RX[idx].signal();
-        }
-    }
-
-    struct RxFuture {
-        port: UartPort,
-    }
-    impl Future for RxFuture {
-        type Output = ();
-        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-            let idx = self.port.index();
-            UART_RX[idx].poll_wait(cx)
-        }
-    }
-
-    async fn read_one(uart: &Uart<'_, impl Sized>, port: UartPort) -> u8 {
-        let idx = port.index();
-        let r = uart_regs(port);
-        if !r.fifo_status().read().rx_fifo_empty().bit_is_set() {
-            return r.data().read().bits() as u8; // byte already waiting
-        }
-        UART_RX[idx].reset();
-        // Enable the UART RX-data interrupt so a byte raises the IRQ.
-        r.intr_en().modify(|_, w| w.rece_data_intr_en().set_bit());
-        let _ = uart; // keep the &Uart borrow for the await's lifetime
-        RxFuture { port }.await;
-        critical_section::with(|cs| UART_BYTE[idx].borrow(cs).get())
-    }
-
-    macro_rules! async_uart {
-        ($uart:ty, $port:expr) => {
-            // embedded_io::ErrorType is already implemented for the blocking impls;
-            // the async Read/Write traits reuse it.
-            impl Write for Uart<'_, $uart> {
-                async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-                    // WS63 UART TX drains immediately on this model; write_byte polls
-                    // tx_fifo_full, so this completes without parking.
-                    for &b in buf {
-                        self.write_byte(b);
-                    }
-                    Ok(buf.len())
-                }
-                async fn flush(&mut self) -> Result<(), Self::Error> {
-                    self.flush_tx();
-                    Ok(())
-                }
-            }
-            impl Read for Uart<'_, $uart> {
-                async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-                    if buf.is_empty() {
-                        return Ok(0);
-                    }
-                    buf[0] = read_one(self, $port).await;
-                    Ok(1)
-                }
-            }
-        };
-    }
-    async_uart!(Uart0<'_>, UartPort::Uart0);
-    async_uart!(Uart1<'_>, UartPort::Uart1);
-    async_uart!(Uart2<'_>, UartPort::Uart2);
-}
+#[path = "uart/asynch.rs"]
+mod asynch_impl;
 
 #[cfg(all(feature = "chip-ws63", feature = "async", feature = "unstable"))]
 pub use asynch_impl::on_interrupt;
