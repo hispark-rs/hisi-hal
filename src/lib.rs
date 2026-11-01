@@ -142,6 +142,9 @@ pub mod timer;
 #[cfg(feature = "chip-ws53")]
 #[path = "timer_ws53.rs"]
 pub mod timer;
+#[cfg(all(feature = "async", feature = "unstable", any(feature = "chip-ws53", feature = "chip-ws63")))]
+#[path = "timer/async_alarm.rs"]
+mod timer_async;
 mod timer_math;
 
 mod tcxo_words;
